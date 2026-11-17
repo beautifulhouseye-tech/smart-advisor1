@@ -1,0 +1,6 @@
+{
+  "name": "AutoMate AI",
+  "description": "Smart auto-reply assistant for messaging apps with keyword rules, contact filters, WorkManager scheduling, driving mode, and local JSON backup.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
