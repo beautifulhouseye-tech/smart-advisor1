@@ -8,6 +8,7 @@ import com.example.data.local.entity.ContactFilterEntity
 import com.example.data.local.entity.ContactFilterListType
 import com.example.data.local.entity.ReplyLogEntity
 import com.example.data.local.entity.ReplyRuleEntity
+import com.example.data.local.entity.ReplyTemplateEntity
 import com.example.data.preferences.AutoMateSettings
 import com.example.data.preferences.ContactFilterMode
 import com.example.data.repository.AutoMateRepository
@@ -32,6 +33,7 @@ import javax.inject.Inject
 data class MainUiState(
     val settings: AutoMateSettings = AutoMateSettings(),
     val rules: List<ReplyRuleEntity> = emptyList(),
+    val templates: List<ReplyTemplateEntity> = emptyList(),
     val contactFilters: List<ContactFilterEntity> = emptyList(),
     val recentLogs: List<ReplyLogEntity> = emptyList(),
     val todayRepliesCount: Int = 0,
@@ -56,25 +58,27 @@ class MainViewModel @Inject constructor(
     private val coreDataFlow = combine(
         repository.settingsFlow,
         repository.rulesFlow,
+        repository.templatesFlow,
         repository.contactFiltersFlow,
-        repository.recentLogsFlow,
-        repository.observeTodayRepliesCount()
-    ) { settings, rules, filters, logs, todayCount ->
-        CoreDataBundle(settings, rules, filters, logs, todayCount)
+        repository.recentLogsFlow
+    ) { settings, rules, templates, filters, logs ->
+        CoreDataBundle(settings, rules, templates, filters, logs, 0)
     }
 
     val uiState: StateFlow<MainUiState> = combine(
         coreDataFlow,
+        repository.observeTodayRepliesCount(),
         pendingReplyCoordinator.connectionStatus,
         permissionsFlow,
         statusMessageFlow
-    ) { core, conn, perms, msg ->
+    ) { core, todayCount, conn, perms, msg ->
         MainUiState(
             settings = core.settings,
             rules = core.rules,
+            templates = core.templates,
             contactFilters = core.filters,
             recentLogs = core.logs,
-            todayRepliesCount = core.todayCount,
+            todayRepliesCount = todayCount,
             serviceConnection = conn,
             permissions = perms,
             statusMessage = msg,
@@ -172,6 +176,31 @@ class MainViewModel @Inject constructor(
         viewModelScope.launch {
             repository.deleteRule(id)
             statusMessageFlow.value = "تم حذف القاعدة"
+        }
+    }
+
+    fun saveTemplate(template: ReplyTemplateEntity) {
+        viewModelScope.launch {
+            repository.upsertTemplate(template)
+            statusMessageFlow.value = if (template.id == 0L) {
+                "تم حفظ القالب الجديد بنجاح"
+            } else {
+                "تم تحديث القالب بنجاح"
+            }
+        }
+    }
+
+    fun duplicateTemplate(template: ReplyTemplateEntity) {
+        viewModelScope.launch {
+            repository.duplicateTemplate(template)
+            statusMessageFlow.value = "تم نسخ القالب بنجاح"
+        }
+    }
+
+    fun deleteTemplate(id: Long) {
+        viewModelScope.launch {
+            repository.deleteTemplate(id)
+            statusMessageFlow.value = "تم حذف القالب"
         }
     }
 
@@ -305,7 +334,10 @@ class MainViewModel @Inject constructor(
         }
         val matched = RuleMatcher.findBestMatch(sampleMessage, state.rules)
         return if (matched != null) {
-            "قاعدة: ${matched.keyword}" to matched.replyText
+            val linked = matched.templateId?.let { tid -> state.templates.firstOrNull { it.id == tid } }
+            val text = linked?.body ?: matched.replyText
+            val label = if (linked != null) "قاعدة: ${matched.keyword} (${linked.title})" else "قاعدة: ${matched.keyword}"
+            label to text
         } else {
             "لا يوجد تطابق" to null
         }
@@ -318,6 +350,7 @@ class MainViewModel @Inject constructor(
     private data class CoreDataBundle(
         val settings: AutoMateSettings,
         val rules: List<ReplyRuleEntity>,
+        val templates: List<ReplyTemplateEntity>,
         val filters: List<ContactFilterEntity>,
         val logs: List<ReplyLogEntity>,
         val todayCount: Int

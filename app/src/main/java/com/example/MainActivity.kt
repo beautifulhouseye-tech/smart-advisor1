@@ -65,6 +65,7 @@ import com.example.ui.navigation.FollowUpRoute
 import com.example.ui.navigation.HomeRoute
 import com.example.ui.navigation.LogsRoute
 import com.example.ui.navigation.MenuReplyRoute
+import com.example.ui.navigation.ReplyTemplatesRoute
 import com.example.ui.navigation.RulesRoute
 import com.example.ui.navigation.SaSettingsRoute
 import com.example.ui.navigation.ServerRoute
@@ -78,6 +79,7 @@ import com.example.ui.screens.FollowUpScreen
 import com.example.ui.screens.HomeScreen
 import com.example.ui.screens.LogsScreen
 import com.example.ui.screens.MenuReplyScreen
+import com.example.ui.screens.ReplyTemplatesScreen
 import com.example.ui.screens.RulesScreen
 import com.example.ui.screens.SaSettingsScreen
 import com.example.ui.screens.ServerScreen
@@ -207,6 +209,7 @@ fun AutoMateRootApp(
         currentDestination?.hasRoute(StatisticsRoute::class) == true ||
         currentDestination?.hasRoute(MenuReplyRoute::class) == true ||
         currentDestination?.hasRoute(FollowUpRoute::class) == true ||
+        currentDestination?.hasRoute(ReplyTemplatesRoute::class) == true ||
         currentDestination?.hasRoute(TestReplyRoute::class) == true
 
     fun navigateTopLevel(route: Any) {
@@ -298,6 +301,7 @@ fun AutoMateRootApp(
                             onNavigateToStatistics = { navController.navigate(StatisticsRoute) },
                             onNavigateToMenus = { navController.navigate(MenuReplyRoute) },
                             onNavigateToFollowUps = { navController.navigate(FollowUpRoute) },
+                            onNavigateToTemplates = { navController.navigate(ReplyTemplatesRoute) },
                             onNavigateToTestReply = { navController.navigate(TestReplyRoute) }
                         )
                     }
@@ -309,7 +313,10 @@ fun AutoMateRootApp(
                             onToggleRule = viewModel::toggleRuleEnabled,
                             onDeleteRule = viewModel::deleteRule,
                             onExportJson = viewModel::exportBackup,
-                            onImportJson = { uri -> viewModel.importBackup(uri, replaceExisting = false) }
+                            onImportJson = { uri -> viewModel.importBackup(uri, replaceExisting = false) },
+                            templates = uiState.templates,
+                            onNavigateToTemplates = { navController.navigate(ReplyTemplatesRoute) },
+                            onSaveAsTemplate = viewModel::saveTemplate
                         )
                     }
 
@@ -386,6 +393,20 @@ fun AutoMateRootApp(
 
                     composable<FollowUpRoute> {
                         FollowUpScreen(
+                            onBack = { navController.popBackStack() }
+                        )
+                    }
+
+                    composable<ReplyTemplatesRoute> {
+                        val linkedCounts = remember(uiState.rules) {
+                            uiState.rules.mapNotNull { it.templateId }.groupingBy { it }.eachCount()
+                        }
+                        ReplyTemplatesScreen(
+                            templates = uiState.templates,
+                            linkedCountsByTemplateId = linkedCounts,
+                            onSaveTemplate = viewModel::saveTemplate,
+                            onDuplicateTemplate = viewModel::duplicateTemplate,
+                            onDeleteTemplate = viewModel::deleteTemplate,
                             onBack = { navController.popBackStack() }
                         )
                     }

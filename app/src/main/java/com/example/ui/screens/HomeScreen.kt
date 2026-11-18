@@ -37,6 +37,7 @@ import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.AccessibilityNew
 import androidx.compose.material.icons.filled.Analytics
 import androidx.compose.material.icons.filled.Bolt
+import androidx.compose.material.icons.filled.Bookmarks
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Cloud
 import androidx.compose.material.icons.filled.DeleteSweep
@@ -112,6 +113,7 @@ fun HomeScreen(
     onNavigateToStatistics: () -> Unit = {},
     onNavigateToMenus: () -> Unit = {},
     onNavigateToFollowUps: () -> Unit = {},
+    onNavigateToTemplates: () -> Unit = {},
     onNavigateToTestReply: (() -> Unit)? = null,
     modifier: Modifier = Modifier
 ) {
@@ -362,6 +364,17 @@ fun HomeScreen(
                     subtitle = "جدولة رسائل متابعة تلقائية بعد الردود",
                     onClick = onNavigateToFollowUps,
                     modifier = Modifier.testTag("followup_feature_card")
+                )
+            }
+
+            // 5i. Reply Templates Feature Card
+            item {
+                FeatureCard(
+                    icon = Icons.Filled.Bookmarks,
+                    label = "قوالب الردود الجاهزة",
+                    subtitle = "مكتبة ردود محفوظة (${uiState.templates.size}) قابلة للربط المباشر بالقواعد",
+                    onClick = onNavigateToTemplates,
+                    modifier = Modifier.testTag("templates_feature_card")
                 )
             }
 

@@ -13,6 +13,7 @@ import com.example.data.local.dao.MemoryOutboxDao
 import com.example.data.local.dao.MenuReplyDao
 import com.example.data.local.dao.ReplyLogDao
 import com.example.data.local.dao.ReplyRuleDao
+import com.example.data.local.dao.ReplyTemplateDao
 import com.example.data.local.dao.ServerConfigDao
 import com.example.data.local.entity.ContactFilterEntity
 import com.example.data.local.entity.ConversationContextEntity
@@ -22,6 +23,7 @@ import com.example.data.local.entity.MemoryOutboxEntity
 import com.example.data.local.entity.MenuReplyEntity
 import com.example.data.local.entity.ReplyLogEntity
 import com.example.data.local.entity.ReplyRuleEntity
+import com.example.data.local.entity.ReplyTemplateEntity
 import com.example.data.local.entity.ServerConfigEntity
 
 @Database(
@@ -34,14 +36,16 @@ import com.example.data.local.entity.ServerConfigEntity
         FollowUpEntity::class,
         DedupKeyEntity::class,
         ConversationContextEntity::class,
-        MemoryOutboxEntity::class
+        MemoryOutboxEntity::class,
+        ReplyTemplateEntity::class
     ],
-    version = 7,
+    version = 8,
     exportSchema = true
 )
 @TypeConverters(AutoMateTypeConverters::class, ServerConverters::class)
 abstract class AutoMateDatabase : RoomDatabase() {
     abstract fun replyRuleDao(): ReplyRuleDao
+    abstract fun replyTemplateDao(): ReplyTemplateDao
     abstract fun contactFilterDao(): ContactFilterDao
     abstract fun replyLogDao(): ReplyLogDao
     abstract fun serverConfigDao(): ServerConfigDao
@@ -198,6 +202,33 @@ abstract class AutoMateDatabase : RoomDatabase() {
                 )
                 db.execSQL(
                     "CREATE INDEX IF NOT EXISTS `index_memory_outbox_conversationKey` ON `memory_outbox` (`conversationKey`)"
+                )
+            }
+        }
+
+        val MIGRATION_7_8 = object : Migration(7, 8) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE `reply_rules` ADD COLUMN `templateId` INTEGER DEFAULT NULL")
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS `reply_templates` (
+                        `id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+                        `title` TEXT NOT NULL,
+                        `category` TEXT NOT NULL,
+                        `body` TEXT NOT NULL,
+                        `replyType` TEXT NOT NULL,
+                        `imageUri` TEXT DEFAULT NULL,
+                        `usageCount` INTEGER NOT NULL,
+                        `createdAt` INTEGER NOT NULL,
+                        `updatedAt` INTEGER NOT NULL
+                    )
+                    """.trimIndent()
+                )
+                db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS `index_reply_templates_category` ON `reply_templates` (`category`)"
+                )
+                db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS `index_reply_templates_updatedAt` ON `reply_templates` (`updatedAt`)"
                 )
             }
         }

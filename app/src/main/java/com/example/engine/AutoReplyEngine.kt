@@ -168,7 +168,6 @@ class AutoReplyEngine @Inject constructor(
                 val matchedSpecific = RuleMatcher.findBestMatch(incoming.messageText, specificRules)
                 if (matchedSpecific != null) {
                     matchedRule = matchedSpecific
-                    replyToSend = matchedSpecific.replyText
                     sourceCategoryLabel = ReplySourceCategory.LOCAL_RULE.name
                 } else {
                     if (aiSettings.enabled) {
@@ -218,12 +217,11 @@ class AutoReplyEngine @Inject constructor(
                         val fallbackRule = RuleMatcher.findBestMatch(incoming.messageText, rules)
                         if (fallbackRule != null) {
                             matchedRule = fallbackRule
-                            replyToSend = fallbackRule.replyText
                             sourceCategoryLabel = ReplySourceCategory.WILDCARD_RULE.name
                         }
                     }
 
-                    if (replyToSend.isNullOrBlank() && aiSettings.enabled && aiSettings.safeFallbackReply.isNotBlank()) {
+                    if (matchedRule == null && replyToSend.isNullOrBlank() && aiSettings.enabled && aiSettings.safeFallbackReply.isNotBlank()) {
                         replyToSend = aiSettings.safeFallbackReply
                         sourceCategoryLabel = ReplySourceCategory.AI_ENGINE.name
                     }
@@ -231,8 +229,24 @@ class AutoReplyEngine @Inject constructor(
             }
         }
 
-        val ruleReplyType = matchedRule?.replyType ?: ReplyRuleEntity.REPLY_TYPE_TEXT
-        val ruleImageUri = matchedRule?.imageUri?.takeIf { it.isNotBlank() }
+        val resolvedRuleContent = matchedRule?.let { repository.resolveRuleContent(it) }
+        if (resolvedRuleContent != null) {
+            val variableMsg = IncomingMessage(
+                app = incoming.packageName,
+                sender = incoming.senderName,
+                senderName = incoming.senderName,
+                message = incoming.messageText,
+                phone = incoming.phone,
+                groupName = incoming.groupName.orEmpty(),
+                isGroup = incoming.isGroup,
+                notificationId = incoming.msgKey,
+                timestamp = incoming.receivedAtMs
+            )
+            replyToSend = VariableEngine.resolveTemplate(resolvedRuleContent.replyText, variableMsg)
+        }
+
+        val ruleReplyType = resolvedRuleContent?.replyType ?: ReplyRuleEntity.REPLY_TYPE_TEXT
+        val ruleImageUri = resolvedRuleContent?.imageUri?.takeIf { it.isNotBlank() }
 
         if (replyToSend.isNullOrBlank() && ruleImageUri == null) {
             return LocalOutcome.NoMatch
@@ -307,6 +321,9 @@ class AutoReplyEngine @Inject constructor(
             is ReplyDispatcher.SendOutcome.Sent -> {
                 matchedRule?.let { rule ->
                     repository.incrementRuleHit(rule.id)
+                    resolvedRuleContent?.templateId?.let { tid ->
+                        repository.incrementTemplateUsage(tid)
+                    }
                     followUpScheduler.scheduleFollowUp(
                         ruleId = rule.id,
                         recipient = incoming.senderName,

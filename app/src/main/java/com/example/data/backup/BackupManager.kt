@@ -6,6 +6,7 @@ import com.example.data.local.entity.ContactFilterEntity
 import com.example.data.local.entity.ContactFilterListType
 import com.example.data.local.entity.MatchType
 import com.example.data.local.entity.ReplyRuleEntity
+import com.example.data.local.entity.ReplyTemplateEntity
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -20,7 +21,19 @@ data class RuleBackupDto(
     val replyText: String,
     val matchType: MatchType = MatchType.CONTAINS,
     val isEnabled: Boolean = true,
-    val priority: Int = 0
+    val priority: Int = 0,
+    val replyType: String = ReplyRuleEntity.REPLY_TYPE_TEXT,
+    val imageUri: String? = null,
+    val templateTitle: String? = null
+)
+
+@Serializable
+data class TemplateBackupDto(
+    val title: String,
+    val category: String = ReplyTemplateEntity.CATEGORY_GENERAL,
+    val body: String,
+    val replyType: String = ReplyRuleEntity.REPLY_TYPE_TEXT,
+    val imageUri: String? = null
 )
 
 @Serializable
@@ -32,10 +45,11 @@ data class ContactFilterBackupDto(
 
 @Serializable
 data class AutoMateBackupPayload(
-    val version: Int = 1,
+    val version: Int = 2,
     val exportedAt: Long = System.currentTimeMillis(),
     val rules: List<RuleBackupDto>,
-    val contactFilters: List<ContactFilterBackupDto>
+    val contactFilters: List<ContactFilterBackupDto>,
+    val templates: List<TemplateBackupDto> = emptyList()
 )
 
 @Singleton
@@ -46,11 +60,13 @@ class BackupManager @Inject constructor(
     suspend fun exportToUri(
         uri: Uri,
         rules: List<ReplyRuleEntity>,
-        filters: List<ContactFilterEntity>
+        filters: List<ContactFilterEntity>,
+        templates: List<ReplyTemplateEntity> = emptyList()
     ): Result<Int> = withContext(Dispatchers.IO) {
         runCatching {
+            val templateTitleById = templates.associate { it.id to it.title }
             val payload = AutoMateBackupPayload(
-                version = 1,
+                version = 2,
                 exportedAt = System.currentTimeMillis(),
                 rules = rules.map {
                     RuleBackupDto(
@@ -58,7 +74,10 @@ class BackupManager @Inject constructor(
                         replyText = it.replyText,
                         matchType = it.matchType,
                         isEnabled = it.isEnabled,
-                        priority = it.priority
+                        priority = it.priority,
+                        replyType = it.replyType,
+                        imageUri = it.imageUri,
+                        templateTitle = it.templateId?.let { tid -> templateTitleById[tid] }
                     )
                 },
                 contactFilters = filters.map {
@@ -67,13 +86,22 @@ class BackupManager @Inject constructor(
                         listType = it.listType,
                         notes = it.notes
                     )
+                },
+                templates = templates.map {
+                    TemplateBackupDto(
+                        title = it.title,
+                        category = it.category,
+                        body = it.body,
+                        replyType = it.replyType,
+                        imageUri = it.imageUri
+                    )
                 }
             )
             val serialized = json.encodeToString(AutoMateBackupPayload.serializer(), payload)
             context.contentResolver.openOutputStream(uri)?.use { stream ->
                 stream.write(serialized.toByteArray(Charsets.UTF_8))
             } ?: error("تعذر فتح ملف التصدير")
-            payload.rules.size + payload.contactFilters.size
+            payload.rules.size + payload.contactFilters.size + payload.templates.size
         }
     }
 

@@ -37,3 +37,6 @@ data object FollowUpRoute
 
 @Serializable
 data object TestReplyRoute
+
+@Serializable
+data object ReplyTemplatesRoute

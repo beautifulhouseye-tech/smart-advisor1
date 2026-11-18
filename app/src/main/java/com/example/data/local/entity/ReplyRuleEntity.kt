@@ -23,7 +23,8 @@ data class ReplyRuleEntity(
     val hitCount: Int = 0,
     val createdAt: Long = System.currentTimeMillis(),
     val replyType: String = REPLY_TYPE_TEXT,
-    val imageUri: String? = null
+    val imageUri: String? = null,
+    val templateId: Long? = null
 ) {
     companion object {
         const val REPLY_TYPE_TEXT = "TEXT"

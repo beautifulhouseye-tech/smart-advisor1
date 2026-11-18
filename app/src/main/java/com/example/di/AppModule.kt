@@ -12,6 +12,7 @@ import com.example.data.local.dao.MemoryOutboxDao
 import com.example.data.local.dao.MenuReplyDao
 import com.example.data.local.dao.ReplyLogDao
 import com.example.data.local.dao.ReplyRuleDao
+import com.example.data.local.dao.ReplyTemplateDao
 import com.example.data.local.dao.ServerConfigDao
 import com.example.data.repository.ServerConfigRepository
 import com.example.data.repository.ServerConfigRepositoryImpl
@@ -46,13 +47,17 @@ object AppModule {
                 AutoMateDatabase.MIGRATION_3_4,
                 AutoMateDatabase.MIGRATION_4_5,
                 AutoMateDatabase.MIGRATION_5_6,
-                AutoMateDatabase.MIGRATION_6_7
+                AutoMateDatabase.MIGRATION_6_7,
+                AutoMateDatabase.MIGRATION_7_8
             )
             .build()
     }
 
     @Provides
     fun provideReplyRuleDao(db: AutoMateDatabase): ReplyRuleDao = db.replyRuleDao()
+
+    @Provides
+    fun provideReplyTemplateDao(db: AutoMateDatabase): ReplyTemplateDao = db.replyTemplateDao()
 
     @Provides
     fun provideContactFilterDao(db: AutoMateDatabase): ContactFilterDao = db.contactFilterDao()

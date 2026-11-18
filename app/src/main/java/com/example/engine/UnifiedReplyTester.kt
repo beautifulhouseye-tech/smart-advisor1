@@ -222,7 +222,8 @@ class UnifiedReplyTester internal constructor(
                 category = ReplySourceCategory.LOCAL_RULE,
                 evaluatedPath = evaluated,
                 latencyMs = (clockMs() - startMs).coerceAtLeast(0L),
-                conversationKey = resolvedConvKey
+                conversationKey = resolvedConvKey,
+                incomingSample = buildIncomingMessage(cleanMessage, senderName, isGroup, phone, startMs)
             )
         }
 
@@ -337,7 +338,8 @@ class UnifiedReplyTester internal constructor(
                 evaluatedPath = evaluated,
                 latencyMs = (clockMs() - startMs).coerceAtLeast(0L),
                 conversationKey = resolvedConvKey,
-                collabOutcome = lastAiOutcome
+                collabOutcome = lastAiOutcome,
+                incomingSample = buildIncomingMessage(cleanMessage, senderName, isGroup, phone, startMs)
             )
         }
 
@@ -428,27 +430,39 @@ class UnifiedReplyTester internal constructor(
         )
     }
 
-    private fun ruleResult(
+    private suspend fun ruleResult(
         rule: ReplyRuleEntity,
         sourceLabel: String,
         category: ReplySourceCategory,
         evaluatedPath: List<String>,
         latencyMs: Long,
         conversationKey: String,
-        collabOutcome: SmartCollaborationCoordinator.CollaborationOutcome? = null
+        collabOutcome: SmartCollaborationCoordinator.CollaborationOutcome? = null,
+        incomingSample: IncomingMessage? = null
     ): UnifiedTestResult {
-        val hasImage = rule.replyType != ReplyRuleEntity.REPLY_TYPE_TEXT && !rule.imageUri.isNullOrBlank()
-        val displayReply = when (rule.replyType) {
-            ReplyRuleEntity.REPLY_TYPE_IMAGE -> "[صورة] ${rule.replyText}".trim()
-            ReplyRuleEntity.REPLY_TYPE_BOTH -> "${rule.replyText}\n[+ صورة مرفقة]".trim()
-            else -> rule.replyText
+        val resolved = repository.resolveRuleContent(rule)
+        val rawText = if (incomingSample != null) {
+            VariableEngine.resolveTemplate(resolved.replyText, incomingSample)
+        } else {
+            resolved.replyText
+        }
+        val hasImage = resolved.replyType != ReplyRuleEntity.REPLY_TYPE_TEXT && !resolved.imageUri.isNullOrBlank()
+        val displayReply = when (resolved.replyType) {
+            ReplyRuleEntity.REPLY_TYPE_IMAGE -> "[صورة] $rawText".trim()
+            ReplyRuleEntity.REPLY_TYPE_BOTH -> "$rawText\n[+ صورة مرفقة]".trim()
+            else -> rawText
+        }
+        val finalLabel = if (!resolved.templateTitle.isNullOrBlank()) {
+            "$sourceLabel • قالب: ${resolved.templateTitle}"
+        } else {
+            sourceLabel
         }
         return UnifiedTestResult(
             matched = true,
             replyText = displayReply,
-            sourceLabel = sourceLabel,
+            sourceLabel = finalLabel,
             sourceCategory = category,
-            imageUri = if (hasImage) rule.imageUri else null,
+            imageUri = if (hasImage) resolved.imageUri else null,
             evaluatedPath = evaluatedPath,
             latencyMs = latencyMs,
             conversationKeyUsed = conversationKey,
