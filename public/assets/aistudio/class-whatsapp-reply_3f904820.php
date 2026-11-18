@@ -1,0 +1,375 @@
+<?php
+if ( ! defined( 'ABSPATH' ) ) exit;
+
+class SA_WhatsApp_Reply {
+
+    const OPTION_KEY_HASH = 'sa_whatsapp_api_key_hash';
+    const MAX_PER_MINUTE  = 60;
+
+    public static function init() {
+        add_action( 'rest_api_init', [ __CLASS__, 'register_routes' ] );
+    }
+
+    public static function register_routes() {
+        register_rest_route( 'smart-advisor/v1', '/whatsapp/reply', [
+            'methods'             => 'POST',
+            'callback'            => [ __CLASS__, 'handle' ],
+            'permission_callback' => [ __CLASS__, 'permission' ],
+        ] );
+    }
+
+    private static function get_config() {
+        return class_exists('SA_WhatsApp_Settings') ? SA_WhatsApp_Settings::get_config() : [];
+    }
+
+    private static function global_skill_enabled( $skill ) {
+        if ( ! class_exists( 'SA_Customer_Service_Settings' ) ) return true;
+        $settings = SA_Customer_Service_Settings::get_config();
+        return ! empty( $settings['enabled'] ) && ! empty( $settings['skills'][ $skill ] );
+    }
+
+    public static function permission( $request ) {
+        $config = self::get_config();
+        if ( empty($config['enabled']) ) {
+             return new WP_Error( 'sa_wa_disabled', 'الخدمة معطلة.', [ 'status' => 403 ] );
+        }
+        if ( class_exists( 'SA_Customer_Service_Settings' ) ) {
+            $service_config = SA_Customer_Service_Settings::get_config();
+            if ( empty( $service_config['enabled'] ) ) return new WP_Error( 'sa_customer_service_disabled', 'المساعد وخدمة العملاء معطلان حالياً.', [ 'status' => 403 ] );
+        }
+
+        $provided = $request->get_header( 'X-SA-API-Key' );
+        if ( empty( $provided ) || ! is_string( $provided ) ) {
+            return new WP_Error( 'sa_missing_key', 'مفتاح API مطلوب.', [ 'status' => 401 ] );
+        }
+        
+        $stored = (string) get_option( self::OPTION_KEY_HASH, '' );
+        $secret = defined('AUTH_KEY') ? AUTH_KEY : wp_salt('auth');
+        
+        if ( '' === $stored || ! hash_equals( $stored, hash_hmac( 'sha256', $provided, $secret ) ) ) {
+            return new WP_Error( 'sa_bad_key', 'مفتاح API غير صحيح.', [ 'status' => 403 ] );
+        }
+
+        global $wpdb;
+        $window = floor( time() / 60 );
+        $key = 'sa_wa_rl_' . $window;
+        $value_name = '_transient_' . $key;
+        $timeout_name = '_transient_timeout_' . $key;
+        $saved = $wpdb->query( $wpdb->prepare(
+            "INSERT INTO {$wpdb->options} (option_name, option_value, autoload) VALUES (%s, %s, 'no')
+             ON DUPLICATE KEY UPDATE option_value = CAST(option_value AS UNSIGNED) + 1",
+            $value_name, '1'
+        ) );
+        if ( false === $saved ) return new WP_Error('sa_rl_error', 'فشل العداد', ['status'=>503]);
+        $timeout_saved = $wpdb->query( $wpdb->prepare(
+            "INSERT IGNORE INTO {$wpdb->options} (option_name, option_value, autoload) VALUES (%s, %s, 'no')",
+            $timeout_name, (string) ( ( $window + 2 ) * 60 )
+        ) );
+        if ( false === $timeout_saved ) return new WP_Error('sa_rl_error', 'فشل ضبط انتهاء عداد الطلبات', ['status'=>503]);
+        
+        $wpdb->query( $wpdb->prepare(
+            "DELETE counter FROM {$wpdb->options} counter INNER JOIN {$wpdb->options} expiry ON expiry.option_name = CONCAT('_transient_timeout_', SUBSTRING(counter.option_name, 12)) WHERE counter.option_name LIKE '_transient_sa_wa_rl_%' AND expiry.option_value < %d",
+            time()
+        ) );
+        $wpdb->query( $wpdb->prepare(
+            "DELETE expiry FROM {$wpdb->options} expiry WHERE expiry.option_name LIKE '_transient_timeout_sa_wa_rl_%' AND expiry.option_value < %d",
+            time()
+        ) );
+        
+        $count = (int) $wpdb->get_var( $wpdb->prepare( "SELECT option_value FROM {$wpdb->options} WHERE option_name = %s", $value_name ) );
+        if ( $count > self::MAX_PER_MINUTE ) {
+            return new WP_Error( 'sa_rate', 'تجاوز الحد.', [ 'status' => 429 ] );
+        }
+        return true;
+    }
+
+    private static function render_template( $key, $variables = [], $fallback = '' ) {
+        $config = self::get_config();
+        $templates = is_array( $config['reply_templates'] ?? null ) ? $config['reply_templates'] : [];
+        $template = isset( $templates[ $key ] ) && is_string( $templates[ $key ] ) ? $templates[ $key ] : $fallback;
+        if ( '' === trim( $template ) ) $template = $fallback;
+        $defaults = [
+            '{store_name}' => function_exists( 'get_bloginfo' ) ? get_bloginfo( 'name' ) : '',
+            '{bot_name}' => sanitize_text_field( $config['bot_name'] ?? 'مساعد المتجر' ),
+            '{link}' => '',
+            '{phone}' => '',
+            '{error}' => '',
+        ];
+        foreach ( $variables as $name => $value ) {
+            $placeholder = '{' . trim( (string) $name, '{}' ) . '}';
+            if ( array_key_exists( $placeholder, $defaults ) ) $defaults[ $placeholder ] = (string) $value;
+        }
+        return strtr( $template, $defaults );
+    }
+
+    private static function response( $reply ) {
+        return new WP_REST_Response( [ 'reply' => self::format_for_whatsapp( $reply ) ], 200 );
+    }
+
+    public static function handle( $request ) {
+        $message = $request->get_param( 'message' );
+        $sender = $request->get_param( "sender" );
+
+        if ( ! is_string( $message ) || trim( $message ) === '' ) {
+            return new WP_REST_Response( [ 'reply' => 'كيف يمكنني مساعدتك؟' ], 200 );
+        }
+        if ( ! is_string( $sender ) || trim( $sender ) === '' ) {
+            return new WP_REST_Response( [ 'reply' => 'خطأ: لم يتم التعرف على رقم المرسل.' ], 200 );
+        }
+
+        if ( function_exists( 'mb_strlen' ) && mb_strlen( $message, 'UTF-8' ) > 500 ) {
+            $message = mb_substr( $message, 0, 500, 'UTF-8' );
+        }
+
+        if ( ! class_exists( 'Service_Conversation_Analyzer' ) ) {
+            return self::response( self::render_template( 'service_error', [], 'الخدمة غير متاحة حالياً.' ) );
+        }
+
+        $config = self::get_config();
+        $sender = preg_replace( '/[^\p{L}\p{N}_+@.\-]/u', '', trim( $sender ) );
+        if ( '' === $sender || strlen( $sender ) > 128 ) {
+            return new WP_REST_Response( [ 'reply' => 'تعذر التحقق من هوية المرسل.' ], 400 );
+        }
+
+
+        // === REGISTRATION INTERCEPTION ===
+        // Priority 0: Must run BEFORE Magic Link so "تسجيل 782206225" creates a new account,
+        // not "not found".
+        if ( class_exists( 'SA_WhatsApp_Registration' ) ) {
+            if ( SA_WhatsApp_Registration::is_register_request( $message ) ) {
+                $reg_phone = SA_WhatsApp_Registration::extract_phone( $message );
+                if ( ! SA_WhatsApp_Magic_Link::check_rate_limit( 'reg_' . $sender ) ) {
+                    return new WP_REST_Response( [ 'reply' => 'تجاوزت حد المحاولات. حاول بعد ساعة.' ], 200 );
+                }
+                list( $reg_uid, $reg_is_new, $reg_err ) = SA_WhatsApp_Registration::find_or_create( $reg_phone );
+
+                if ( $reg_is_new && $reg_uid ) {
+                    $setup_url = SA_WhatsApp_Registration::generate_setup_link( $reg_uid );
+                    $reply = self::render_template( 'registration_success', [ 'link' => $setup_url ], "تم إنشاء حسابك بنجاح!\n\n{link}" );
+                } elseif ( $reg_err === 'exists' ) {
+                    $reply = self::render_template( 'registration_exists', [ 'phone' => $reg_phone ], "هذا الرقم مسجل مسبقاً.\nاستخدم: اربط حسابي {phone}" );
+                } else {
+                    $reply = self::render_template( 'registration_error', [ 'error' => $reg_err ], 'تعذر إنشاء الحساب: {error}' );
+                }
+                return new WP_REST_Response( [ 'reply' => self::format_for_whatsapp( $reply ) ], 200 );
+            }
+        }
+        // === END REGISTRATION ===
+                // === UNIFIED LOGIN/REGISTRATION INTERCEPTION ===
+        if ( class_exists( 'SA_WhatsApp_Magic_Link' ) ) {
+            $extracted_phone = '';
+            $is_link_req = SA_WhatsApp_Magic_Link::is_link_request( $message )
+                || SA_WhatsApp_Magic_Link::is_phone_message( $message );
+            // Only extract a phone when the message itself is a link request or a plain phone number.
+            if ( $is_link_req && preg_match( '/([0-9]{9,15})/', $message, $m ) ) {
+                $extracted_phone = $m[1];
+            }
+
+            if ( $is_link_req ) {
+                if ( ! empty( $extracted_phone ) ) {
+                    if ( ! SA_WhatsApp_Magic_Link::check_rate_limit( $sender ) ) {
+                        return new WP_REST_Response( [ 'reply' => 'تجاوزت حد المحاولات. حاول بعد ساعة.' ], 200 );
+                    }
+
+                    $ml_user_id = SA_WhatsApp_Magic_Link::find_user_by_phone( $extracted_phone );
+
+                    if ( $ml_user_id ) {
+                        // User exists -> Magic Link
+                        $ml_url = SA_WhatsApp_Magic_Link::generate_token( $ml_user_id );
+                        $link_text = self::render_template( 'magic_link', [ 'link' => $ml_url ], "رابط الدخول إلى حسابك:\n{link}" );
+                        $reply = self::render_template( 'login_link_intro', [ 'phone' => $extracted_phone ], 'جاري ربط رقمك {phone} بحسابك...' ) . "\n\n" . $link_text;
+                    } else {
+                        // User doesn't exist -> Register
+                        if ( class_exists( 'SA_WhatsApp_Registration' ) ) {
+                            list( $new_uid, $is_new, $err ) = SA_WhatsApp_Registration::find_or_create( $extracted_phone );
+                            if ( $is_new && $new_uid ) {
+                                $setup_url = SA_WhatsApp_Registration::generate_setup_link( $new_uid );
+                                $reply = self::render_template( 'new_account_intro', [ 'phone' => $extracted_phone ], 'جاري تسجيل حساب جديد على رقمك {phone}...' ) . "\n\n" . self::render_template( 'registration_success', [ 'link' => $setup_url ], "تم إنشاء حسابك بنجاح!\n{link}" );
+                            } else {
+                                $reply = self::render_template( 'registration_error', [ 'error' => $err ], 'تعذر إنشاء الحساب: {error}' );
+                            }
+                        } else {
+                            $reply = self::render_template( 'registration_error', [ 'error' => 'لم أجد حساباً مسجلاً بهذا الرقم.' ], 'تعذر إكمال الطلب: {error}' );
+                        }
+                    }
+                    return new WP_REST_Response( [ 'reply' => self::format_for_whatsapp( $reply ) ], 200 );
+                } else {
+                    // No phone -> Ask for it
+                    $link_msg = self::render_template( 'link_request', [], $config['link_request_message'] ?? 'لربط حسابك بالواتساب، أرسل رقم جوالك المسجل في المتجر.' );
+                    return self::response( $link_msg );
+                }
+            }
+        }
+        // === END MAGIC LINK ===
+
+        // === ADDRESS FAST-PATH ===
+        // Detects: عنوان، موقع، وين المتجر، فين المتجر، فرع، فروع، خريطة، مكان المتجر
+        if ( preg_match( '/(?:عنوان(?:كم| المتجر)?|وين\s*المتجر|فين\s*المتجر|مكان\s*المتجر|موقع(?:كم| المتجر)?|الفرع|فروعكم|خريطة|خريطه)/iu', $message ) ) {
+            $cs = class_exists( 'SA_Customer_Service_Settings' ) ? SA_Customer_Service_Settings::get_config() : [];
+            $store_address = trim( (string) ( $cs['store_address'] ?? '' ) );
+            if ( $store_address !== '' ) {
+                $lines = [ '📍 *عنوان المتجر*', '', $store_address ];
+                if ( ! empty( $cs['store_hours'] ) ) $lines[] = '';
+                if ( ! empty( $cs['store_hours'] ) ) $lines[] = '🕒 ' . $cs['store_hours'];
+                if ( ! empty( $cs['store_phone'] ) ) $lines[] = '';
+                if ( ! empty( $cs['store_phone'] ) ) $lines[] = '📞 ' . $cs['store_phone'];
+                if ( ! empty( $cs['store_map_url'] ) ) $lines[] = '';
+                if ( ! empty( $cs['store_map_url'] ) ) $lines[] = '🗺️ الموقع على الخريطة:';
+                if ( ! empty( $cs['store_map_url'] ) ) $lines[] = $cs['store_map_url'];
+                return new WP_REST_Response( [ 'reply' => self::format_for_whatsapp( implode( "\n", $lines ) ) ], 200 );
+            }
+        }
+        // === END ADDRESS FAST-PATH ===
+        $cache_key = 'sa_wa_ctx_' . hash_hmac( 'sha256', $sender, wp_salt( 'auth' ) );
+        $context = get_transient( $cache_key );
+        
+        $history = [];
+        $known_context = [];
+        $conversation_state = [];
+
+        if ( is_array( $context ) && $config['memory_minutes'] > 0 ) {
+            $history = is_array( $context['history'] ?? null ) ? $context['history'] : [];
+            $known_context = is_array( $context['known_context'] ?? null ) ? $context['known_context'] : [];
+            $conversation_state = is_array( $context['conversation_state'] ?? null ) ? $context['conversation_state'] : [];
+
+            if ( empty( $known_context['type'] ) ) {
+                $legacy_type = Service_Conversation_Analyzer::recover_type_from_history( $history );
+                if ( $legacy_type !== null ) {
+                    $known_context = [ 'type' => $legacy_type, 'known' => $known_context ];
+                }
+            }
+        }
+
+        $analysis = Service_Conversation_Analyzer::analyze( $message, $history, $known_context, $conversation_state );
+
+        if ( ! empty( $analysis['error'] ) ) {
+            return self::response( self::render_template( 'service_error', [], 'عذراً، أواجه ضغطاً في الخدمة حالياً. حاول مرة أخرى بعد قليل.' ) );
+        }
+
+        $action = $analysis['action'] ?? 'chitchat';
+        $message_lc = function_exists('mb_strtolower') ? mb_strtolower( $message, 'UTF-8' ) : strtolower( $message );
+        $asks_offers = (bool) preg_match( '/(عروض|خصومات|تخفيضات|التخفيض|الخصم|فيه خصم|عندكم خصم|عرض خاص|sale|discount|offer)/iu', $message_lc );
+        if ( $asks_offers ) $action = 'offers';
+        $reply  = '';
+
+        if ( 'offers' === $action ) {
+            if ( empty( $config['skills']['offers'] ) || ! self::global_skill_enabled( 'offers_discounts' ) ) {
+                $reply = self::render_template( 'offers_disabled', [], 'العروض والخصومات غير متاحة حالياً.' );
+            } elseif ( ! function_exists( 'wc_get_products' ) ) {
+                $reply = 'تعذر الوصول إلى عروض المتجر حالياً.';
+            } else {
+                $sale_products = wc_get_products( [ 'status' => 'publish', 'limit' => 3, 'return' => 'objects', 'on_sale' => true, 'stock_status' => 'instock', 'orderby' => 'date', 'order' => 'DESC' ] );
+                $lines = [];
+                foreach ( (array) $sale_products as $product ) {
+                    if ( ! $product || ! $product->is_visible() || ! $product->is_purchasable() || ! $product->is_in_stock() || ! $product->is_on_sale() ) continue;
+                    $line = '• ' . $product->get_name() . ' — ' . wp_strip_all_tags( $product->get_price_html() );
+                    $url = esc_url_raw( get_permalink( $product->get_id() ) );
+                    if ( 'single_link' === $config['reply_mode'] && empty( $lines ) && $url ) $line .= "\n" . $url;
+                    elseif ( 'multi_link' === $config['reply_mode'] && $url ) $line .= "\n" . $url;
+                    $lines[] = $line;
+                }
+                $reply = $lines ? self::render_template( 'offers_intro', [], 'هذه بعض العروض المتاحة حالياً:' ) . "\n" . implode( "\n\n", $lines ) : self::render_template( 'no_offers', [], 'لا توجد منتجات عليها عروض ومتاحة للشراء حالياً.' );
+            }
+        } elseif ( 'chitchat' === $action || 'refuse' === $action ) {
+            if ( empty($config['skills']['greeting']) ) {
+                 $reply = self::render_template( 'service_error', [], 'عذراً، لا أستطيع تنفيذ هذا الطلب.' );
+            } else {
+                 $reply = $analysis['reply_text'] ?: 'كيف يمكنني مساعدتك؟';
+            }
+            if ( $action === 'chitchat' && ! empty( $config['skills']['greeting'] ) ) {
+                 $reply = self::render_template( 'welcome' ) . "\n" . $reply;
+            }
+        } elseif ( $action === 'ask' ) {
+            $reply = $analysis['question_text'] ?: self::render_template( 'ask_clarification', [], 'هل يمكنك توضيح طلبك؟' );
+        } else {
+            if ( empty($config['skills']['product_search']) || ! self::global_skill_enabled( 'product_search' ) ) {
+                 return self::response( self::render_template( 'search_disabled', [], 'البحث غير متاح حالياً.' ) );
+            }
+
+            $type  = $analysis['type'] ?? ( $known_context['type'] ?? null );
+            $known = is_array( $analysis['known'] ?? null ) ? $analysis['known'] : [];
+            $msg_l = function_exists('mb_strtolower') ? mb_strtolower( $message, 'UTF-8' ) : strtolower( $message );
+
+            if ( (function_exists('mb_strpos') ? mb_strpos($msg_l, 'عطر') : strpos($msg_l, 'عطر')) !== false ) { $type = 'عطر'; }
+            elseif ( (function_exists('mb_strpos') ? mb_strpos($msg_l, 'حذاء') : strpos($msg_l, 'حذاء')) !== false ) { $type = 'حذاء'; }
+            elseif ( (function_exists('mb_strpos') ? mb_strpos($msg_l, 'ساعة') : strpos($msg_l, 'ساعة')) !== false ) { $type = 'ساعة'; }
+
+            if ( $type === null && empty( $known['name_contains'] ) ) {
+                $reply = self::render_template( 'ask_clarification', [], 'ماذا تبحث عنه؟' );
+            } else {
+                if ( ! class_exists( 'Service_Smart_Search' ) ) {
+                    $reply = self::render_template( 'search_disabled', [], 'البحث غير متاح.' );
+                } else {
+                    $products = $type === null
+                        ? Service_Smart_Search::find_by_name_contains( $known['name_contains'], 5, $known )
+                        : Service_Smart_Search::find( $type, $known, $message, 5 );
+
+                    if ( empty( $products ) ) {
+                        $reply = self::render_template( 'no_products', [], 'لم أجد منتجات مطابقة.' );
+                    } else {
+                        $listed = array_slice( $products, 0, 3 );
+                        $lines  = [ self::render_template( 'products_intro', [], 'وجدت لك:' ) ];
+                        $first  = true;
+
+                        foreach ( $listed as $p ) {
+                            $name  = $p['name'] ?? 'منتج';
+                            $price = $p['price'] ?? '';
+                            $raw_url = $p['url'] ?? '';
+                            
+                            $safe_url = rawurldecode( $raw_url );
+                            $safe_url = esc_url_raw( $safe_url );
+
+                            $line  = '• ' . $name;
+                            if ( $price !== '' ) $line .= ' — ' . $price;
+
+                            if ( $config['reply_mode'] === 'single_link' ) {
+                                if ( $first && $safe_url !== '' ) {
+                                    $line .= "\n\n " . $safe_url . " \n";
+                                    $first = false;
+                                }
+                            } elseif ( $config['reply_mode'] === 'multi_link' ) {
+                                if ( $safe_url !== '' ) $line .= "\n " . $safe_url;
+                            }
+                            $lines[] = $line;
+                        }
+                        $lines[] = self::render_template( 'products_outro', [], 'هل تريد تفاصيل أكثر؟' );
+                        $reply = implode( "\n", $lines );
+                    }
+                }
+            }
+        }
+
+        if ( $config['memory_minutes'] > 0 ) {
+            $new_history = $history;
+            $new_history[] = [ 'role' => 'user', 'content' => $message ];
+            $new_history[] = [ 'role' => 'assistant', 'content' => $reply ];
+            
+            $max_h = absint($config['max_history'] ?? 4);
+            if ( count( $new_history ) > $max_h * 2 ) {
+                 $new_history = array_slice( $new_history, -($max_h * 2) );
+            }
+
+            $memory_type = $analysis['type'] ?? ( $known_context['type'] ?? null );
+            $memory_known = is_array( $analysis['known'] ?? null ) ? $analysis['known'] : [];
+            if ( $memory_type !== null && $memory_known === [] && is_array( $known_context['known'] ?? null ) ) {
+                $memory_known = $known_context['known'];
+            }
+            $new_context = [
+                'history' => $new_history,
+                'known_context' => [ 'type' => $memory_type, 'known' => $memory_known ],
+                'conversation_state' => $analysis['conversation_state'] ?? $conversation_state,
+            ];
+            set_transient( $cache_key, $new_context, $config['memory_minutes'] * MINUTE_IN_SECONDS );
+        }
+
+        if ( empty( $reply ) ) { $reply = 'كيف يمكنني مساعدتك اليوم؟'; }
+        return self::response( $reply );
+    }
+
+    private static function format_for_whatsapp( $text ) {
+        $text = preg_replace( '/\*\*(.+?)\*\*/u', '*$1*', $text );
+        $text = preg_replace( "/\n{3,}/u", "\n\n", $text );
+        return trim( $text );
+    }
+}
+SA_WhatsApp_Reply::init();
