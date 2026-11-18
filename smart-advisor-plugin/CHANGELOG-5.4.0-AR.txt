@@ -1,0 +1,159 @@
+Smart Advisor 5.5.1 — خيارات التجميل في الدردشة وخطة المشروع
+==============================================================
+
+الإصدار: 5.5.0 → 5.5.1
+الملف الرئيسي: smart-advisor.php (Version + MBA_VERSION = 5.5.1)
+
+- أسئلة مستحضرات التجميل في الدردشة: الحاجة (بشرة/شعر/مكياج)، نوع البشرة، لون البشرة للمكياج، نوع الشعر للعناية بالشعر.
+- لون البشرة ونوع الشعر لا يُسألان في المطبخ أو الأحذية أو باقي الأقسام.
+- ترتيب البحث يقدّم المنتجات المطابقة للون البشرة ونوع الشعر.
+- عند إنشاء خطة مشروع زواج أو هدية تظهر حقول نوع/لون البشرة ونوع الشعر قبل جلب منتجات التجميل.
+
+Smart Advisor 5.5.0 — النية وحالة المحادثة وترتيب البحث وسلة المطبخ
+==============================================================
+
+الإصدار: 5.4.2 → 5.5.0
+الملف الرئيسي: smart-advisor.php (Version + MBA_VERSION = 5.5.0)
+
+- تصنيف النية محلياً: تحية، تغيير فئة، تصفية بالاسم/العلامة/الحداثة، تخطيط سلة، بناء سلة، ومتابعة نعم.
+- «مستلزمات رجالية» تبحث في أسماء المنتجات عن «رجالي» ولا تُجبر على فئة الأزياء أو العناية بالبشرة.
+- «بشرتي دهنية وأعاني من حبوب» ترتّب منتجات البشرة الدهنية/الحبوب قبل المرطبات العامة.
+- «سكيتشرز» ثم «موديل أحدث» يبقيان العلامة ويرتّبان حسب تاريخ الإنشاء ثم المعرّف.
+- conversation_state يُرسل ويُعاد مع كل رد (بما فيها التحية والسؤال وفشل السلة) ويُحفظ في sessionStorage.
+- تخطيط مستلزمات المطبخ يعرض مرشحاً واحداً لكل تصنيف دون إضافة إلى السلة، ثم نعم تضيف المخطط.
+- «اعمل سلة المشتريات» يضيف منتجاً قابلاً للشراء لكل تصنيف مطبخ، ويعيد الحساب، ويسأل عن التصنيف التالي.
+- «أضف هذه المنتجات» يضيف آخر المنتجات المعروضة فقط، ولا يحوّل المحادثة إلى المطبخ.
+- نعم تنفّذ pending_action فقط؛ بدون إجراء معلّق يُطرح سؤال توضيحي دون إعادة الكتالوج.
+- الزائر بلا جلسة WooCommerce يحصل على روابط إضافة ولا يُعلن نجاح الإضافة.
+- سلة المطبخ مستقلة عن مخطط المشاريع ومتابعة التقدم.
+- show_alternatives يُضبط فقط عند وجود بدائل فعلية، ويُسأل عنها صراحة. «نعم» بعد كتالوج بلا بدائل لا تعيد البحث.
+- المنتج المتغير الأب لا يُضاف للسلة؛ يُستخدم variation متوفر أو يُتخطى.
+- collect_store_groups يحد المسح بـ 80 تصنيفاً و8 مجموعات مطبخ.
+- سياق الدردشة يبقى في الجلسة (sessionStorage) ولا يُحفظ في تفضيلات الحساب عبر الأجهزة.
+- إصلاح «groups is not defined» عند إنشاء خطة المشروع في مستشاري الشخصي.
+- «مستلزمات تجميل العروس / الشناطة» تعرض قائمة مصنّفة من منتجات المتجر فقط (بشرة، شعر، مكياج، عطور) دون اختراع منتجات.
+
+Smart Advisor 5.4.2 — تحليل محلي وتجديد الجلسة
+==============================================
+
+الإصدار: 5.4.1 → 5.4.2
+الملف الرئيسي: smart-advisor.php (Version + MBA_VERSION = 5.4.2)
+
+- تخطي استدعاء النموذج عندما تُحدَّد نوع المنتج أو إجابة المتابعة من الرسالة محلياً.
+- التحية القصيرة لا تمحو نوع المنتج ولا الإجابات المعروفة سابقاً.
+- GET /session يجدد REST nonce، والدردشة تعيد المحاولة بعد 403.
+- recommend_products لم يعد يسقط إلى أحدث المنتجات عند فشل مطابقة الفئة.
+- نقل سكربت الملف الشخصي ومتتبع الرغبات إلى assets/js.
+
+Smart Advisor 5.4.1 — جودة التوصية وإصلاحات المتابعة
+=====================================================
+
+الإصدار: 5.4.0 → 5.4.1
+الملف الرئيسي: smart-advisor.php (Version + MBA_VERSION = 5.4.1)
+
+- صياغة رد التوصية أصبحت كتالوجاً عربياً: مقدمة باسم المتجر والنطاق، تجميع حسب القسم، اسم المنتج ثم وصف قصير، ثم السعر الحالي والأصلي عند التخفيض، ثم سؤال متابعة.
+- إصلاح GET /profile/insights: كان يستدعي inferred_values على SA_Customer_Behavior وهي غير موجودة؛ أصبح يفوّض إلى SA_Customer_Intelligence::inferred_values.
+- إيقاف استدعاء process_pending_refreshes من كل تحميل صفحة؛ التحديث الجماعي يبقى على cron الساعي، والصفحة تحدّث تفضيلات الزائر الحالي فقط عند الحاجة.
+- حماية POST /chat بـ REST nonce (X-WP-Nonce) من الواجهة والخادم بدل الإبقاء على المسار عاماً بالكامل.
+
+Smart Advisor 5.4.0 — سجل الإصلاحات
+=====================================
+
+الإصدار: 5.3.0 → 5.4.0
+الملف الرئيسي: smart-advisor.php (Version + MBA_VERSION = 5.4.0)
+
+حرج
+----
+#1 ربط known_context بين الواجهة والخادم
+- الواجهة: متغير knownContext، استعادة من sessionStorage، حفظه في saveChatState، إرساله في body، وتحديثه من data.known_context قبل addHistory.
+- الخادم: كل مسارات الرد في handle() تُرجع known_context بما فيها empty_products ومسار المنتجات الناجح.
+
+#2 السعر HTML في خطة المشروع
+- class-project-planner.php: السعر أصبح html_entity_decode(wp_strip_all_tags(wc_price($price)), ENT_QUOTES, UTF-8) فيظهر نصاً مثل 1,500 YER لا HTML ولا entities.
+
+#3 keyword_fallback يتجاهل history
+- التوقيع: keyword_fallback($message, $types, $history = []).
+- يفحص الرسالة الحالية أولاً ثم آخر 6 رسائل user من array_reverse($history).
+- analyze() يمرّر $history، وإن عاد null يُستخدم known_context['type'] قبل chitchat.
+
+#4 save_progress يمحو notes
+- غياب notes من الطلب يمرّر NULL ويُحدَّث بـ notes=COALESCE(VALUES(notes), notes).
+- textarea للملاحظات في loadProjectPlan ويُرسل مع الحفظ.
+
+#5 بطاقة منتج الدردشة غير قابلة للنقر
+- addProducts يغلّف img + sa-card-info داخل <a href> عند وجود safeURL(p.url).
+- أزرار السلة/الرغبة تبقى خارج الرابط.
+
+عالٍ
+----
+#6 refresh_inferred_preferences على كل حدث
+- record() يضع sa_prefs_refresh_needed بدل الاستدعاء الفوري.
+- تنظيف الأحداث القديمة نُقل إلى purge_old_events() وتُستدعى من cron.
+- process_pending_refreshes() يعالج حتى 50 مستخدماً ثم يحذف المفتاح، مع حد مرة/ساعة.
+- الجدولة في sa_smart_advisor_activate() بشرط !wp_next_scheduled، وإعادة التأمين في init.
+- wp_clear_scheduled_hook عند التعطيل.
+- fallback: template_redirect يحدّث تفضيلات الزائر الحالي إن وُجد المفتاح، ثم يمرّ على الدفعة المقيّدة.
+
+#7 البحث بالفئات عبر term_id
+- استبدال wc_get_products(['category'=>slug]) بـ get_posts + tax_query على term_id.
+- دالة get_products_by_category_term_ids($term_ids, $limit).
+
+#8 parse_budget يتجاهل «حذاء مقاس 42 بـ 500»
+- يُفضَّل الرقم المجاور لعلامة مالية (بـ/بسعر/ميزانية/…).
+- إن وُجد سياق مالي مع أرقام متعددة يُؤخذ آخر رقم (مثال: 10 قطع بميزانية 500 → 500).
+- بدون سياق مالي ومع مقاس/عدد/عمر يُتجاهل الرقم.
+
+#9 تقليص build_system_prompt
+- يعرض: - {slug}: keywords ثم خيارات كل حقل (بدون map_to).
+- السؤال التالي حصرياً من next_required_question()؛ إن عاد null فـ action=search.
+- canonicalize_choice يحوّل مرادفات شائعة (ذكر→رجالي) قبل filter_known.
+
+موصى بها
+--------
+#10 توحيد الإصدارات: Version: 2.1.0 في رؤوس chat-controller, gemini, conversation-analyzer, smart-search, frontend, security.
+#11 حماية set_time_limit: إن max_execution_time < 35 يُخفَّض sa_ai_http_timeout. كل timeout في gemini عبر apply_filters('sa_ai_http_timeout', 20).
+#12 is_wp_error بعد wp_get_post_terms/get_terms في intelligence و planner.
+#13 TRANSACTION حول حلقة save_progress مع ROLLBACK عند الفشل.
+#14 check_user_rate_limit على recommend_products, save_preference, save_project, save_progress, get_project_plan.
+#15 تقييد known_context من العميل: type≤50، known≤20 مفتاحاً، مفتاح≤50، قيمة scalar≤200.
+#16 recommend_products يستبعد ai_inferred غير المؤكد (source=customer OR is_confirmed=1). get_preferences كما هو.
+#17 wishlist_tracker_script: أول دخول يحفظ الحالة الحالية بصمت دون إرسال أحداث تاريخية.
+
+اختياري
+-------
+#18 حذف MIN_VALID_PRICE/MAX_VALID_PRICE من class-smart-search.php (غير مستخدمتين). لم يُحذف class-module-manager.php و interface-module.php لأنهما غير محمّلين أصلاً وحذف الملفات غير مطلوب لهذا الإصلاح.
+#19 إعادة عرض uiMessages السابقة بعد تعريف addText.
+#20 inferred_values: الثقة تعتمد على النسبة + عدد الأحداث + عدد الفئات.
+#21 privacy_exporter يفك JSON لـ preference_value ويعرضه مقروءاً.
+#22 safeURL يقارن url.host (يشمل المنفذ) بدل hostname.
+#23 recommend() يقتصر الناتج على 30 كلمة.
+
+سلوك الدردشة بعد المراجعة الحية
+--------------------------------
+- لا يُسأل عن الميزانية في الدردشة. الحقل budget يُتخطى في stop_when.
+- لا يُسأل عن مقاس الحذاء. المقاس يُقرأ من سلة WooCommerce (ثم آخر الطلبات كاحتياط) ويُستخدم في التصفية.
+- ميزانية البحث تُؤخذ فقط من الملف الشخصي (budget_max مؤكد/من العميل) عند وجود موافقة.
+- استخراج known محلياً من الرسالة (خيارات + أرقام المقاس) حتى لا تتكرر الأسئلة عند فشل LLM.
+- تحية قصيرة (صباح الخير / مرحبا / كيف الحال) تُرد محلياً دون استدعاء النموذج.
+- رد التوصية قائمة منظمة من منتجات البحث فقط (بدون اختراع): مقدمة + تجميع حسب القسم + السعر الحالي والأصلي عند التخفيض + سؤال متابعة. حتى 8 منتجات في النص و3 بطاقات.
+
+ما لم يُنفَّذ
+-------------
+- تفعيل نظام الوحدات (module-manager / interface-module): الكود ميت وغير موصول في smart-advisor.php؛ تفعيله خارج نطاق إصلاح 5.4.0 ويتطلب مجلد modules غير موجود.
+- اختبار يدوي POST /chat على متجر حيّ: لا يوجد WooCommerce/REST في بيئة التنفيذ. التحقق الآلي: php -l على كل ملف معدّل → No syntax errors detected.
+
+ملفات معدّلة
+------------
+smart-advisor.php
+core/class-chat-controller.php
+core/class-frontend.php
+core/class-gemini.php
+core/class-security.php
+services/class-conversation-analyzer.php
+services/class-smart-search.php
+services/class-project-planner.php
+services/class-project-progress.php
+services/class-customer-behavior.php
+services/class-customer-intelligence.php
+services/class-customer-profile.php
+CHANGELOG-5.4.0-AR.txt

@@ -1,0 +1,141 @@
+<?php
+/**
+ * Stateless WhatsApp reply bridge.
+ * No user creation, no persistence, no session tracking.
+ */
+if ( ! defined( 'ABSPATH' ) ) exit;
+
+class SA_WhatsApp_Reply {
+
+    const OPTION_KEY_HASH = 'sa_whatsapp_api_key_hash';
+    const MAX_PER_MINUTE  = 60;
+
+    public static function init() {
+        add_action( 'rest_api_init', [ __CLASS__, 'register_routes' ] );
+    }
+
+    public static function register_routes() {
+        register_rest_route( 'smart-advisor/v1', '/whatsapp/reply', [
+            'methods'             => 'POST',
+            'callback'            => [ __CLASS__, 'handle' ],
+            'permission_callback' => [ __CLASS__, 'permission' ],
+        ] );
+    }
+
+    public static function permission( $request ) {
+        $provided = $request->get_header( 'X-SA-API-Key' );
+        if ( empty( $provided ) || ! is_string( $provided ) ) {
+            return new WP_Error( 'sa_missing_key', 'مفتاح API مطلوب.', [ 'status' => 401 ] );
+        }
+        $stored = (string) get_option( self::OPTION_KEY_HASH, '' );
+        if ( '' === $stored ) {
+            return new WP_Error( 'sa_not_configured', 'مفتاح API غير مُعد.', [ 'status' => 503 ] );
+        }
+        if ( ! hash_equals( $stored, hash_hmac( 'sha256', $provided, wp_salt( 'auth' ) ) ) ) {
+            return new WP_Error( 'sa_bad_key', 'مفتاح API غير صحيح.', [ 'status' => 403 ] );
+        }
+        $rl = 'sa_wa_rl_' . gmdate( 'YmdHi' );
+        if ( ! wp_cache_add( $rl, 1, 'sa_wa', 120 ) ) {
+            $c = (int) wp_cache_get( $rl, 'sa_wa' );
+            if ( $c >= self::MAX_PER_MINUTE ) {
+                return new WP_Error( 'sa_rate', 'تم تجاوز حد الطلبات.', [ 'status' => 429 ] );
+            }
+            wp_cache_set( $rl, $c + 1, 'sa_wa', 120 );
+        }
+        return true;
+    }
+
+    public static function handle( $request ) {
+        $message = sanitize_textarea_field( (string) $request->get_param( 'message' ) );
+        if ( trim( $message ) === '' ) {
+            return new WP_REST_Response( [ 'reply' => 'كيف يمكنني مساعدتك؟' ], 200 );
+        }
+        if ( function_exists( 'mb_strlen' ) && mb_strlen( $message, 'UTF-8' ) > 500 ) {
+            $message = mb_substr( $message, 0, 500, 'UTF-8' );
+        }
+
+        wp_set_current_user( 0 );
+
+        if ( ! class_exists( 'Service_Conversation_Analyzer' ) ) {
+            return new WP_REST_Response( [ 'reply' => 'الخدمة غير متاحة حالياً.' ], 200 );
+        }
+
+        // Analyze statelessly (no history, no known_context)
+        $analysis = Service_Conversation_Analyzer::analyze( $message, [], [], [] );
+
+        if ( ! empty( $analysis['error'] ) ) {
+            return new WP_REST_Response( [ 'reply' => 'عذراً، واجهت مشكلة مؤقتة. حاول مرة أخرى.' ], 200 );
+        }
+
+        $action = $analysis['action'] ?? 'chitchat';
+
+        // Greeting / Refuse / Chitchat
+        if ( in_array( $action, [ 'chitchat', 'refuse' ], true ) ) {
+            $reply = $analysis['reply_text'] ?: 'كيف يمكنني مساعدتك؟';
+            return new WP_REST_Response( [ 'reply' => self::format_for_whatsapp( $reply ) ], 200 );
+        }
+
+        // Ask (clarifying question)
+        if ( $action === 'ask' ) {
+            $reply = $analysis['question_text'] ?: 'هل يمكنك توضيح طلبك؟';
+            return new WP_REST_Response( [ 'reply' => self::format_for_whatsapp( $reply ) ], 200 );
+        }
+
+        // Search
+        $type  = $analysis['type'] ?? null;
+        $msg_l = function_exists('mb_strtolower') ? mb_strtolower($message, 'UTF-8') : strtolower($message);
+        if ( mb_strpos($msg_l, 'عطر') !== false ) { $type = 'عطر'; $known['category'] = 'عطور'; }
+        elseif ( mb_strpos($msg_l, 'حذاء') !== false || mb_strpos($msg_l, 'احذية') !== false ) { $type = 'حذاء'; $known['category'] = 'أحذية'; }
+        elseif ( mb_strpos($msg_l, 'ساعة') !== false ) { $type = 'ساعة'; $known['category'] = 'ساعات'; }
+        elseif ( mb_strpos($msg_l, 'مطبخ') !== false ) { $type = 'أدوات_منزلية'; $known['category'] = 'مطبخ'; }
+        $known = is_array( $analysis['known'] ?? null ) ? $analysis['known'] : [];
+
+        if ( $type === null && empty( $known['name_contains'] ) ) {
+            return new WP_REST_Response( [ 'reply' => 'ماذا تبحث عنه بالضبط؟ (عطر، ساعة، حذاء...)' ], 200 );
+        }
+
+        if ( ! class_exists( 'Service_Smart_Search' ) ) {
+            return new WP_REST_Response( [ 'reply' => 'البحث غير متاح حالياً.' ], 200 );
+        }
+
+        $products = $type === null
+            ? Service_Smart_Search::find_by_name_contains( $known['name_contains'], 5, $known )
+            : Service_Smart_Search::find( $type, $known, $message, 5 );
+
+        if ( empty( $products ) ) {
+            return new WP_REST_Response( [ 'reply' => 'لم أجد منتجات مطابقة. جرب وصفاً آخر.' ], 200 );
+        }
+
+        // Build WhatsApp-friendly reply (top 3 products)
+        $listed = array_slice( $products, 0, 3 );
+        $lines  = [ 'وجدت لك:' ];
+        foreach ( $listed as $p ) {
+            $name  = $p['name'] ?? 'منتج';
+            $price = $p['price'] ?? '';
+            $url   = urldecode( $p['url'] ?? '' );
+            $url   = preg_replace( '#^https?://#', '', $url );
+            $url   = str_replace( '//', '/', $url );
+            $url   = 'https://' . ltrim( $url, '/' );
+            $line  = '• ' . $name;
+            if ( $price !== '' ) $line .= ' — ' . $price;
+            if ( $url !== '' ) {
+                $cache_buster = ( time() % 10000 );
+                $final_url = $url . ( strpos( $url, '?' ) !== false ? '&' : '?' ) . 'v=' . $cache_buster;
+                $line .= "\n\n " . $final_url . " ";
+            }
+            $lines[] = $line;
+        }
+        $lines[] = 'هل تريد تفاصيل أكثر عن أحدها؟';
+
+        return new WP_REST_Response( [ 'reply' => self::format_for_whatsapp( implode( "\n", $lines ) ) ], 200 );
+    }
+
+    private static function format_for_whatsapp( $text ) {
+        // Convert **bold** → *bold* (WhatsApp format)
+        $text = preg_replace( '/\*\*(.+?)\*\*/u', '*$1*', $text );
+        // Collapse excessive blank lines
+        $text = preg_replace( "/\n{3,}/u", "\n\n", $text );
+        return trim( $text );
+    }
+}
+SA_WhatsApp_Reply::init();

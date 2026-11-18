@@ -1,0 +1,167 @@
+<?php
+/**
+ * Customer-service AI control center. Settings are isolated from recommendation/project settings.
+ */
+if ( ! defined( 'ABSPATH' ) ) exit;
+
+class SA_Customer_Service_Settings {
+    const OPTION = 'sa_customer_service_config';
+
+    public static function init() {
+        add_action( 'admin_menu', [ __CLASS__, 'menu' ], 40 );
+        add_action( 'admin_post_sa_save_customer_service', [ __CLASS__, 'save' ] );
+        add_action( 'wp_ajax_sa_test_customer_service', [ __CLASS__, 'test' ] );
+    }
+
+    public static function defaults() {
+        return [
+            'enabled' => 1,
+            'assistant_name' => 'مساعد المتجر',
+            'tone' => 'friendly_professional',
+            'verbosity' => 'balanced',
+            'language' => 'auto',
+            'welcome_message' => 'مرحباً بك! كيف يمكنني مساعدتك اليوم؟',
+            'store_context' => '',
+            'shipping_policy' => '',
+            'returns_policy' => '',
+            'handoff_message' => 'سأحوّل استفسارك إلى فريق خدمة العملاء لمساعدتك بشكل أدق.',
+            'handoff_keywords' => 'شكوى، مشكلة في الطلب، موظف، تحدث مع شخص',
+            'skills' => [ 'product_advice' => 1, 'product_search' => 1, 'comparison' => 1, 'cart_guidance' => 1, 'project_advice' => 1, 'order_status' => 0, 'after_sales' => 1, 'complementary_products' => 1, 'project_followup' => 1, 'offers_discounts' => 1 ],
+            'permissions' => [ 'add_to_cart' => 1, 'order_lookup' => 0, 'modify_order' => 0, 'issue_coupon' => 0 ],
+        ];
+    }
+
+    public static function get_config() {
+        $saved = get_option( self::OPTION, [] );
+        $defaults = self::defaults();
+        $saved = is_array( $saved ) ? $saved : [];
+        $config = wp_parse_args( $saved, $defaults );
+        foreach ( [ 'skills', 'permissions' ] as $group ) {
+            $config[ $group ] = wp_parse_args( is_array( $saved[ $group ] ?? null ) ? $saved[ $group ] : [], $defaults[ $group ] );
+        }
+        return $config;
+    }
+
+    public static function menu() {
+        add_submenu_page( 'smart-advisor', 'خدمة العملاء بالذكاء الاصطناعي', 'خدمة العملاء AI', 'manage_options', 'sa-customer-service', [ __CLASS__, 'render' ] );
+    }
+
+    public static function save() {
+        if ( ! current_user_can( 'manage_options' ) ) wp_die( 'غير مصرح لك.' );
+        check_admin_referer( 'sa_save_customer_service' );
+        $in = isset( $_POST['sa_cs'] ) && is_array( $_POST['sa_cs'] ) ? wp_unslash( $_POST['sa_cs'] ) : [];
+        $old = self::get_config();
+        $valid_tones = [ 'friendly_professional', 'formal', 'casual', 'concise' ];
+        $valid_verbosity = [ 'short', 'balanced', 'detailed' ];
+        $valid_languages = [ 'auto', 'ar', 'en' ];
+        $clean = [
+            'enabled' => isset( $in['enabled'] ) ? 1 : 0,
+            'assistant_name' => sanitize_text_field( $in['assistant_name'] ?? $old['assistant_name'] ),
+            'tone' => in_array( $in['tone'] ?? '', $valid_tones, true ) ? $in['tone'] : $old['tone'],
+            'verbosity' => in_array( $in['verbosity'] ?? '', $valid_verbosity, true ) ? $in['verbosity'] : $old['verbosity'],
+            'language' => in_array( $in['language'] ?? '', $valid_languages, true ) ? $in['language'] : $old['language'],
+            'welcome_message' => sanitize_textarea_field( $in['welcome_message'] ?? '' ),
+            'store_context' => sanitize_textarea_field( $in['store_context'] ?? '' ),
+            'shipping_policy' => sanitize_textarea_field( $in['shipping_policy'] ?? '' ),
+            'returns_policy' => sanitize_textarea_field( $in['returns_policy'] ?? '' ),
+            'handoff_message' => sanitize_textarea_field( $in['handoff_message'] ?? '' ),
+            'handoff_keywords' => sanitize_text_field( $in['handoff_keywords'] ?? '' ),
+            'skills' => [], 'permissions' => [],
+        ];
+        foreach ( array_keys( self::defaults()['skills'] ) as $key ) $clean['skills'][ $key ] = isset( $in['skills'][ $key ] ) ? 1 : 0;
+        foreach ( array_keys( self::defaults()['permissions'] ) as $key ) $clean['permissions'][ $key ] = isset( $in['permissions'][ $key ] ) ? 1 : 0;
+        update_option( self::OPTION, $clean, false );
+        wp_safe_redirect( add_query_arg( [ 'page' => 'sa-customer-service', 'updated' => '1' ], admin_url( 'admin.php' ) ) );
+        exit;
+    }
+
+    private static function checkbox( $name, $label, $checked ) {
+        printf( '<label style="display:inline-flex;gap:8px;align-items:center;margin:5px 18px 5px 0"><input type="checkbox" name="sa_cs[%1$s]" value="1" %2$s> %3$s</label>', esc_attr( $name ), checked( $checked, 1, false ), esc_html( $label ) );
+    }
+
+    public static function render() {
+        if ( ! current_user_can( 'manage_options' ) ) return;
+        $c = self::get_config();
+        ?>
+        <div class="wrap" dir="rtl">
+          <h1>🤖 مركز التحكم في خدمة العملاء بالذكاء الاصطناعي</h1>
+          <p>إعدادات مستقلة لشخصية المساعد، ومعلومات المتجر، والمهارات، والصلاحيات. لا تغيّر هذه الصفحة إعدادات المشاريع أو محرك التوصيات.</p>
+          <?php if ( isset( $_GET['updated'] ) ) : ?><div class="notice notice-success is-dismissible"><p>تم حفظ إعدادات خدمة العملاء.</p></div><?php endif; ?>
+          <form method="post" action="<?php echo esc_url( admin_url( 'admin-post.php' ) ); ?>">
+            <input type="hidden" name="action" value="sa_save_customer_service"><?php wp_nonce_field( 'sa_save_customer_service' ); ?>
+            <h2>1. شخصية المساعد</h2><table class="form-table"><tbody>
+              <tr><th>تفعيل تعليمات خدمة العملاء</th><td><?php self::checkbox( 'enabled', 'تفعيل إعدادات شخصية المساعد وقواعد خدمة العملاء', $c['enabled'] ); ?></td></tr>
+              <tr><th><label for="sa-cs-name">اسم المساعد</label></th><td><input class="regular-text" id="sa-cs-name" name="sa_cs[assistant_name]" value="<?php echo esc_attr( $c['assistant_name'] ); ?>"></td></tr>
+              <tr><th>أسلوب الرد</th><td><select name="sa_cs[tone]"><option value="friendly_professional" <?php selected( $c['tone'], 'friendly_professional' ); ?>>ودّي واحترافي</option><option value="formal" <?php selected( $c['tone'], 'formal' ); ?>>رسمي</option><option value="casual" <?php selected( $c['tone'], 'casual' ); ?>>ودّي وبسيط</option><option value="concise" <?php selected( $c['tone'], 'concise' ); ?>>مختصر ومباشر</option></select></td></tr>
+              <tr><th>طول الرد</th><td><select name="sa_cs[verbosity]"><option value="short" <?php selected( $c['verbosity'], 'short' ); ?>>قصير</option><option value="balanced" <?php selected( $c['verbosity'], 'balanced' ); ?>>متوازن</option><option value="detailed" <?php selected( $c['verbosity'], 'detailed' ); ?>>تفصيلي</option></select></td></tr>
+              <tr><th>اللغة</th><td><select name="sa_cs[language]"><option value="auto" <?php selected( $c['language'], 'auto' ); ?>>اكتشاف لغة العميل تلقائياً</option><option value="ar" <?php selected( $c['language'], 'ar' ); ?>>العربية</option><option value="en" <?php selected( $c['language'], 'en' ); ?>>الإنجليزية</option></select></td></tr>
+              <tr><th>رسالة الترحيب</th><td><textarea class="large-text" rows="2" name="sa_cs[welcome_message]"><?php echo esc_textarea( $c['welcome_message'] ); ?></textarea></td></tr>
+            </tbody></table>
+            <h2>2. مصادر معرفة المساعد وسياسات المتجر</h2><p>يُستخدم النص الذي تدخله هنا كمرجع مساعد. بيانات المنتجات والأسعار والمخزون يجب أن تبقى من WooCommerce مباشرة.</p><table class="form-table"><tbody>
+              <tr><th>معلومات المتجر</th><td><textarea class="large-text" rows="4" name="sa_cs[store_context]" placeholder="نبذة المتجر، أوقات العمل، وسائل التواصل..."><?php echo esc_textarea( $c['store_context'] ); ?></textarea></td></tr>
+              <tr><th>سياسة الشحن والتوصيل</th><td><textarea class="large-text" rows="4" name="sa_cs[shipping_policy]"><?php echo esc_textarea( $c['shipping_policy'] ); ?></textarea></td></tr>
+              <tr><th>سياسة الاستبدال والاسترجاع</th><td><textarea class="large-text" rows="4" name="sa_cs[returns_policy]"><?php echo esc_textarea( $c['returns_policy'] ); ?></textarea></td></tr>
+            </tbody></table>
+            <h2>3. مهارات المساعد</h2><p>هذه الخيارات تحدد المهارات المسموح للمساعد بتقديمها؛ المهارات التي تحتاج تكاملاً إضافياً لا تُفعّل وظيفياً بمجرد تحديدها.</p><div class="card" style="max-width:900px;padding:12px 20px">
+              <?php
+              $skill_labels = [ 'product_advice' => 'استشارات المنتجات', 'product_search' => 'البحث الذكي عن المنتجات', 'comparison' => 'مقارنة المنتجات', 'cart_guidance' => 'المساعدة في السلة', 'project_advice' => 'استشارات المشاريع', 'order_status' => 'الاستفسار عن حالة الطلب', 'after_sales' => 'خدمة ما بعد البيع', 'complementary_products' => 'اكتشاف المنتجات المكملة', 'project_followup' => 'متابعة احتياجات العميل والمشاريع', 'offers_discounts' => 'العروض والخصومات' ];
+              foreach ( $skill_labels as $key => $label ) self::checkbox( 'skills][' . $key, $label, $c['skills'][ $key ] ?? 0 );
+              ?>
+              <p class="description">المهارات الجديدة لها وظائف REST فعلية: المنتجات المكملة عبر البيع المتقاطع/الترقية والتصنيفات المشتركة، متابعة الاحتياجات غير المكتملة للمشاريع المملوكة للعميل، والعروض المنشورة بأسعار التخفيض في WooCommerce. تتطلب واجهة العميل استدعاء نقاط API المخصصة، ولا يكفي تفعيل المربع وحده لإظهارها تلقائياً داخل المحادثة.</p>
+            </div>
+            <h2>4. الصلاحيات</h2><div class="card" style="max-width:900px;padding:12px 20px">
+              <?php
+              $permission_labels = [ 'add_to_cart' => 'السماح بتوجيه العميل لإضافة المنتجات للسلة', 'order_lookup' => 'السماح بالوصول إلى بيانات الطلب بعد التحقق من العميل', 'modify_order' => 'السماح بتعديل الطلبات', 'issue_coupon' => 'السماح بإنشاء أو إصدار كوبونات' ];
+              foreach ( $permission_labels as $key => $label ) self::checkbox( 'permissions][' . $key, $label, $c['permissions'][ $key ] ?? 0 );
+              ?>
+              <p class="description">العمليات الحساسة مثل تعديل الطلب وإصدار كوبون تظل غير متاحة حتى بناء تكامل آمن ومراجعة صلاحياته.</p>
+            </div>
+            <h2>5. التحويل إلى موظف</h2><table class="form-table"><tbody>
+              <tr><th>كلمات تدل على طلب المساعدة</th><td><input class="large-text" name="sa_cs[handoff_keywords]" value="<?php echo esc_attr( $c['handoff_keywords'] ); ?>"><p class="description">كلمات مفصولة بفواصل. إعداد الكلمات لا ينشئ نظام تحويل فعلياً قبل ربط قناة الموظفين.</p></td></tr>
+              <tr><th>رسالة التحويل</th><td><textarea class="large-text" rows="2" name="sa_cs[handoff_message]"><?php echo esc_textarea( $c['handoff_message'] ); ?></textarea></td></tr>
+            </tbody></table>
+            <?php submit_button( 'حفظ إعدادات خدمة العملاء' ); ?>
+          </form>
+          <hr><h2>6. اختبار شخصية المساعد</h2><p>اختبر رد النموذج باستخدام الإعدادات المحفوظة دون إرسال رسالة إلى عميل.</p>
+          <textarea id="sa-cs-test-input" class="large-text" rows="2" placeholder="مثال: هل يمكنكم توضيح سياسة التوصيل؟"></textarea><p><button type="button" class="button button-secondary" id="sa-cs-test">اختبار الرد</button> <span id="sa-cs-test-status" aria-live="polite"></span></p><pre id="sa-cs-test-output" style="white-space:pre-wrap;background:#fff;border:1px solid #ccd0d4;padding:14px;max-width:900px;display:none"></pre>
+        </div>
+        <script>(function(){var b=document.getElementById('sa-cs-test');if(!b)return;b.addEventListener('click',async function(){var q=document.getElementById('sa-cs-test-input').value.trim(),s=document.getElementById('sa-cs-test-status'),o=document.getElementById('sa-cs-test-output');if(!q){s.textContent='اكتب سؤالاً للاختبار أولاً.';return;}b.disabled=true;s.textContent='جارٍ الاختبار...';o.style.display='none';try{var r=await fetch(ajaxurl,{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded; charset=UTF-8'},body:new URLSearchParams({action:'sa_test_customer_service',nonce:'<?php echo esc_js( wp_create_nonce( 'sa_test_customer_service' ) ); ?>',message:q})});var d=await r.json();if(!d.success)throw new Error(d.data&&d.data.message?d.data.message:'تعذر الاختبار');o.textContent=d.data.reply||'';o.style.display='block';s.textContent='اكتمل الاختبار.';}catch(e){s.textContent=e.message;}finally{b.disabled=false;}});})();</script>
+        <?php
+    }
+
+    public static function get_prompt_rules() {
+        $c = self::get_config();
+        if ( empty( $c['enabled'] ) ) return '';
+        $tone = [ 'friendly_professional' => 'ودّي واحترافي', 'formal' => 'رسمي ومحترم', 'casual' => 'ودّي وبسيط', 'concise' => 'مختصر ومباشر' ];
+        $length = [ 'short' => 'اجعل الرد قصيراً', 'balanced' => 'اجعل الرد متوازناً', 'detailed' => 'قدّم شرحاً تفصيلياً عند الحاجة' ];
+        $parts = [ 'اسمك: ' . $c['assistant_name'], 'أسلوبك: ' . ( $tone[ $c['tone'] ] ?? $tone['friendly_professional'] ), $length[ $c['verbosity'] ] ?? $length['balanced'], 'لغة الرد: ' . ( $c['language'] === 'auto' ? 'استخدم لغة العميل' : ( $c['language'] === 'ar' ? 'العربية' : 'الإنجليزية' ) ), 'لا تخترع أسعاراً أو مواصفات أو مخزوناً أو وعود توصيل. عند غياب معلومة مؤكدة، صرّح بذلك بوضوح.' ];
+        foreach ( [ 'معلومات المتجر' => 'store_context', 'سياسة الشحن' => 'shipping_policy', 'سياسة الاسترجاع والاستبدال' => 'returns_policy' ] as $label => $key ) if ( trim( $c[ $key ] ) !== '' ) $parts[] = $label . ': ' . $c[ $key ];
+        $skill_labels = [ 'product_advice' => 'استشارات المنتجات', 'product_search' => 'البحث عن المنتجات', 'comparison' => 'مقارنة المنتجات', 'cart_guidance' => 'إرشاد العميل للسلة', 'project_advice' => 'استشارات المشاريع', 'order_status' => 'الاستفسار عن الطلبات', 'after_sales' => 'خدمة ما بعد البيع', 'complementary_products' => 'اكتشاف المنتجات المكملة', 'project_followup' => 'متابعة احتياجات العميل والمشاريع', 'offers_discounts' => 'العروض والخصومات' ];
+        $enabled_skills = [];
+        $disabled_skills = [];
+        foreach ( $skill_labels as $key => $label ) {
+            if ( ! empty( $c['skills'][ $key ] ) ) $enabled_skills[] = $label;
+            else $disabled_skills[] = $label;
+        }
+        $parts[] = 'المهارات المسموح تقديمها: ' . ( $enabled_skills ? implode( '، ', $enabled_skills ) : 'لا توجد مهارات مفعلة' );
+        $parts[] = 'المنتجات المكملة لا تُقترح إلا من روابط البيع المتقاطع/الترقية أو تصنيفات WooCommerce المشتركة، مع استبعاد المنتج الأساسي وما في السلة.';
+        $parts[] = 'متابعة المشاريع محصورة في مشاريع العميل نفسه والاحتياجات غير المكتملة المسجلة فعلياً؛ لا تنشئ احتياجات أو مشتريات افتراضية.';
+        $parts[] = 'العروض والخصومات تؤخذ حصراً من أسعار التخفيض المنشورة والفعالة في WooCommerce؛ لا تخترع نسبة خصم أو كود كوبون.';
+        if ( $disabled_skills ) $parts[] = 'لا تعرض نفسك كمتخصص في المهارات المعطلة: ' . implode( '، ', $disabled_skills );
+        if ( trim( $c['handoff_keywords'] ) !== '' ) $parts[] = 'مؤشرات تستدعي طلب دعم بشري أو توضيحاً إضافياً: ' . $c['handoff_keywords'];
+        if ( trim( $c['handoff_message'] ) !== '' ) $parts[] = 'صياغة مقترحة عند الحاجة لموظف: ' . $c['handoff_message'];
+        $parts[] = 'الصلاحيات التنفيذية: لا تنفذ ولا تدّعِ تنفيذ أي عملية داخل المتجر. أضف للسلة أو اطلع على الطلب أو تعدّل الطلب أو تصدر كوبون فقط إذا كان التكامل البرمجي الآمن متاحاً ومفعلاً فعلياً.';
+        return "\n\nتعليمات خدمة العملاء القابلة للضبط:\n- " . implode( "\n- ", $parts );
+    }
+
+    public static function test() {
+        if ( ! current_user_can( 'manage_options' ) ) wp_send_json_error( [ 'message' => 'غير مصرح.' ], 403 );
+        check_ajax_referer( 'sa_test_customer_service', 'nonce' );
+        $message = isset( $_POST['message'] ) ? sanitize_textarea_field( wp_unslash( $_POST['message'] ) ) : '';
+        if ( $message === '' ) wp_send_json_error( [ 'message' => 'السؤال فارغ.' ], 400 );
+        if ( ! class_exists( 'SA_Customer_Service_Composer' ) ) wp_send_json_error( [ 'message' => 'مكوّن خدمة العملاء غير متاح.' ], 500 );
+        $result = SA_Customer_Service_Composer::compose( $message, [], [ 'force_service' => true ], '', [] );
+        if ( ! empty( $result['provider_error'] ) ) wp_send_json_error( [ 'message' => 'فشل الاتصال بمزود الذكاء الاصطناعي.' ], 502 );
+        wp_send_json_success( [ 'reply' => wp_strip_all_tags( (string) ( $result['reply'] ?? '' ) ), 'path' => $result['path'] ?? 'customer_service' ] );
+    }
+}

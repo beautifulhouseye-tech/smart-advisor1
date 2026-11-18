@@ -1,0 +1,141 @@
+#sa-toggle {
+    position: fixed;
+    bottom: 24px;
+    width: 60px;
+    height: 60px;
+    border-radius: 50%;
+    background: var(--sa-color, #e91e63);
+    color: #fff;
+    border: 0;
+    cursor: grab;
+    font-size: 27px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    box-shadow: 0 4px 15px rgba(0,0,0,.25);
+    z-index: 9999999;
+    padding: 0;
+    touch-action: none;
+    user-select: none;
+}
+#sa-toggle.sa-pos-left { left: 24px; right: auto; }
+#sa-toggle.sa-pos-right { right: 24px; left: auto; }
+#sa-toggle:focus-visible { outline: 3px solid #222; outline-offset: 4px; }
+#sa-toggle.sa-dragging { cursor: grabbing; transform: scale(1.08); }
+#sa-panel {
+    position: fixed;
+    width: 370px;
+    max-width: calc(100vw - 24px);
+    height: 530px;
+    max-height: calc(100vh - 100px);
+    max-height: calc(100dvh - 100px);
+    background: #fff;
+    border-radius: 16px;
+    box-shadow: 0 8px 40px rgba(0,0,0,.25);
+    display: none;
+    flex-direction: column;
+    overflow: hidden;
+    z-index: 9999998;
+    direction: rtl;
+    font-family: system-ui,sans-serif;
+}
+#sa-panel.open { display: flex; }
+#sa-head {
+    background: var(--sa-color, #e91e63);
+    color: #fff;
+    padding: 14px 18px;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    font-weight: 700;
+    flex-shrink: 0;
+}
+#sa-close { background: none; border: 0; color: #fff; font-size: 26px; cursor: pointer; }
+#sa-msgs {
+    flex: 1;
+    min-height: 0;
+    overflow-y: auto;
+    overflow-x: hidden;
+    padding: 14px;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    background: #f5f5f7;
+    scrollbar-width: thin;
+    scrollbar-color: #ccc transparent;
+    position: relative;
+}
+#sa-msgs::-webkit-scrollbar { width: 6px; }
+#sa-msgs::-webkit-scrollbar-thumb { background: #ccc; border-radius: 3px; }
+.sa-msg { padding: 10px 14px; border-radius: 14px; max-width: 90%; line-height: 1.65; font-size: 14px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.sa-msg.user { align-self: flex-start; background: var(--sa-color, #e91e63); color: #fff; }
+.sa-msg.bot { align-self: flex-end; background: #fff; color: #1a1a1a; border: 1px solid #e5e5e5; }
+.sa-msg.typing { opacity: .6; }
+.sa-privacy-note { font-size: 11px; color: #68707d; padding: 0 14px 8px; line-height: 1.5; background: #fff; border-top: 1px solid #eee; }
+#sa-form { display: flex; padding: 10px; gap: 8px; border-top: 1px solid #e5e5e5; background: #fff; flex-shrink: 0; z-index: 10; }
+#sa-input { flex: 1; min-width: 0; padding: 10px 14px; border: 1px solid #ddd; border-radius: 22px; font-size: 14px; color: #1a1a1a; }
+#sa-send { background: var(--sa-color, #e91e63); color: #fff; border: 0; padding: 0 18px; border-radius: 22px; font-weight: 700; cursor: pointer; }
+#sa-send:disabled { opacity: .5; cursor: wait; }
+#sa-panel .sa-products-wrapper {
+    display: flex !important;
+    flex-wrap: nowrap !important;
+    gap: 10px !important;
+    overflow-x: auto !important;
+    overflow-y: hidden !important;
+    width: 100% !important;
+    max-width: 100% !important;
+    padding: 5px 0 !important;
+    margin-top: 10px !important;
+    margin-bottom: 5px !important;
+    box-sizing: border-box !important;
+    flex-shrink: 0 !important;
+    -webkit-overflow-scrolling: touch;
+    scrollbar-width: none !important;
+}
+#sa-panel .sa-products-wrapper::-webkit-scrollbar { display: none !important; }
+#sa-panel .sa-card {
+    display: flex !important;
+    flex-direction: column !important;
+    flex: 0 0 150px !important;
+    width: 150px !important;
+    height: auto !important;
+    background: #fff !important;
+    border: 1px solid #e5e5e5 !important;
+    border-radius: 12px !important;
+    overflow: hidden !important;
+    box-sizing: border-box !important;
+}
+#sa-panel .sa-card > a { display: block !important; color: inherit !important; text-decoration: none !important; }
+#sa-panel .sa-card img { width: 100% !important; height: 130px !important; object-fit: contain !important; background: #f9f9f9 !important; padding: 8px !important; border-bottom: 1px solid #f0f0f0 !important; box-sizing: border-box !important; }
+#sa-panel .sa-card-info { padding: 8px !important; display: flex !important; flex-direction: column !important; flex-grow: 1 !important; }
+#sa-panel .sa-card-name { font-size: 12px !important; font-weight: 700 !important; color: #222 !important; margin-bottom: 6px !important; line-height: 1.4 !important; height: 34px !important; overflow: hidden !important; display: -webkit-box !important; -webkit-line-clamp: 2 !important; -webkit-box-orient: vertical !important; }
+#sa-panel .sa-card-price { font-size: 13px !important; color: var(--sa-color, #e91e63) !important; font-weight: 700 !important; margin-top: auto !important; }
+#sa-panel .sa-card-actions { display: flex !important; gap: 6px !important; padding: 0 8px 8px 8px !important; }
+#sa-panel .sa-btn { flex: 1 !important; min-width: 0; padding: 8px 0 !important; font-size: 11px !important; font-weight: 700 !important; text-align: center !important; border-radius: 8px !important; text-decoration: none !important; border: 0 !important; cursor: pointer !important; display: flex !important; align-items: center !important; justify-content: center !important; }
+#sa-panel .sa-btn-cart { background: var(--sa-color, #e91e63) !important; color: #fff !important; }
+#sa-panel .sa-btn-wish { background: #f1f1f4 !important; color: #333 !important; }
+#sa-panel .sa-btn-wish.is-saved { background: #ffe8ed !important; color: #c2185b !important; }
+@media(max-width:480px) {
+    #sa-panel { width: calc(100vw - 16px); height: calc(100dvh - 100px); max-height: none; }
+    #sa-toggle { bottom: calc(16px + env(safe-area-inset-bottom)); }
+}
+@media(prefers-reduced-motion:reduce) {
+    #sa-toggle, #sa-panel { scroll-behavior: auto; transition: none !important; }
+}
+
+/* 5.8.0 product detail metadata */
+.sa-card-brand,.sa-card-attributes,.sa-card-stock{font-size:12px;line-height:1.6;margin-top:4px;color:#666;}
+.sa-card-stock{font-weight:600;}
+.sa-card-rating{font-size:12px;color:#8a6414;margin-top:4px;}
+
+/* 6.3.0: factual label for live alternatives to unavailable products. */
+.sa-card-alternative {
+    display: inline-block;
+    margin: 4px 0 7px;
+    padding: 4px 8px;
+    border-radius: 6px;
+    background: #eaf7ee;
+    color: #176b35;
+    font-size: 12px;
+    line-height: 1.5;
+}

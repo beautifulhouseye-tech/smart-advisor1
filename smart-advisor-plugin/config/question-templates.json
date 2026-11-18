@@ -1,0 +1,662 @@
+{
+  "version": "2.0.0",
+  "default_max_questions": 3,
+  "budget_question": {
+    "ask": "هل تفضل أن أقترح ضمن ميزانية محددة، أم أختار لك الأفضل بغض النظر عن السعر؟",
+    "default_sort": "popularity",
+    "parse_rules": {
+      "has_number": "استخدم الرقم كحد أقصى للسعر",
+      "no_preference": "الأفضل حسب الشعبية/المبيعات، وليس الأعلى سعراً",
+      "cheapest": "الأرخص (ترتيب تصاعدي)",
+      "unsure": "الأكثر شعبية (وليس الأعلى سعراً)"
+    }
+  },
+  "types": {
+    "عطر": {
+      "keywords": [
+        "عطر",
+        "عطور",
+        "perfume",
+        "برفان",
+        "رائحة"
+      ],
+      "multi_category": false,
+      "fallback_tags": [
+        "عطور"
+      ],
+      "critical_questions": [
+        {
+          "key": "gender",
+          "ask": "هل العطر للرجال أم للنساء؟",
+          "options": [
+            "رجالي",
+            "نسائي",
+            "للجنسين"
+          ]
+        },
+        {
+          "key": "budget",
+          "type": "diplomatic_budget"
+        }
+      ],
+      "max_questions": 2,
+      "stop_when": [
+        "gender",
+        "budget"
+      ]
+    },
+    "ساعة": {
+      "keywords": [
+        "ساعة",
+        "ساعات",
+        "watch",
+        "ساعة يد",
+        "ساعه"
+      ],
+      "multi_category": false,
+      "fallback_tags": [
+        "ساعات"
+      ],
+      "critical_questions": [
+        {
+          "key": "gender",
+          "ask": "هل تبحث عن ساعة رجالي، نسائي، أم طقم للزوجين؟",
+          "options": [
+            "رجالي",
+            "نسائي",
+            "زوجين"
+          ]
+        },
+        {
+          "key": "budget",
+          "type": "diplomatic_budget"
+        }
+      ],
+      "max_questions": 2,
+      "stop_when": [
+        "gender",
+        "budget"
+      ]
+    },
+    "حذاء": {
+      "keywords": [
+        "حذاء",
+        "احذية",
+        "shoes",
+        "كوتشي",
+        "صندل",
+        "شبشب",
+        "جزمة",
+        "حذا",
+        "سكيتشرز",
+        "سكيتشرس",
+        "skechers"
+      ],
+      "multi_category": false,
+      "fallback_tags": [
+        "أحذية"
+      ],
+      "critical_questions": [
+        {
+          "key": "type",
+          "ask": "ما نوع الحذاء الذي تبحث عنه؟",
+          "options": [
+            "رسمي",
+            "كاجول",
+            "طبي",
+            "صنادل",
+            "رياضي",
+            "شبشب"
+          ]
+        },
+        {
+          "key": "size",
+          "ask": "ما مقاسك؟ (مثال: 42)",
+          "type": "numeric",
+          "min": 32,
+          "max": 48,
+          "filter_by": "attribute",
+          "attribute_aliases": [
+            "المقاس",
+            "pa_shoes",
+            "pa_mens-shoe-sizes",
+            "pa_size",
+            "pa_المقاسات-الملابس"
+          ]
+        },
+        {
+          "key": "budget",
+          "type": "diplomatic_budget"
+        }
+      ],
+      "max_questions": 3,
+      "stop_when": [
+        "type",
+        "size",
+        "budget"
+      ]
+    },
+    "حقيبة": {
+      "keywords": [
+        "حقيبة",
+        "حقائب",
+        "bag",
+        "شنطة",
+        "شنط",
+        "حقيبه"
+      ],
+      "multi_category": false,
+      "fallback_tags": [
+        "حقائب"
+      ],
+      "critical_questions": [
+        {
+          "key": "usage",
+          "ask": "لأي استخدام تحتاج الحقيبة؟",
+          "options": [
+            "لابتوب",
+            "نسائية",
+            "سفر",
+            "مدرسية",
+            "مكياج"
+          ]
+        },
+        {
+          "key": "budget",
+          "type": "diplomatic_budget"
+        }
+      ],
+      "max_questions": 2,
+      "stop_when": [
+        "usage",
+        "budget"
+      ]
+    },
+    "مفروشات": {
+      "keywords": [
+        "مفروشات",
+        "لحاف",
+        "سجاد",
+        "ملاية",
+        "ملايات",
+        "بطانية",
+        "بطانيات",
+        "وسادة",
+        "شرشف"
+      ],
+      "multi_category": false,
+      "fallback_tags": [
+        "مفروشات"
+      ],
+      "critical_questions": [
+        {
+          "key": "type",
+          "ask": "ما نوع المفروشات التي تبحث عنها؟",
+          "options": [
+            "لحاف",
+            "سجاد",
+            "ملاية",
+            "بطانية",
+            "وسادة"
+          ]
+        },
+        {
+          "key": "bed_size",
+          "ask": "ما مقاس السرير؟ (نفر أم نفرين)",
+          "options": [
+            "نفر",
+            "نفرين"
+          ],
+          "affects_search": false,
+          "affects_recommendation": true
+        },
+        {
+          "key": "budget",
+          "type": "diplomatic_budget"
+        }
+      ],
+      "max_questions": 3,
+      "stop_when": [
+        "type",
+        "budget"
+      ]
+    },
+    "جهاز_كهربائي": {
+      "keywords": [
+        "جهاز",
+        "أجهزة",
+        "كهربائي",
+        "كهربائية",
+        "خلاط",
+        "مروحة",
+        "مفرمة",
+        "قلاية",
+        "غلاية",
+        "مكنسة"
+      ],
+      "multi_category": false,
+      "fallback_tags": [
+        "أجهزه كهربائيه"
+      ],
+      "critical_questions": [
+        {
+          "key": "category",
+          "ask": "أي نوع من الأجهزة تحتاج؟",
+          "options": [
+            "مطبخ",
+            "مكانس",
+            "مروحة",
+            "عصارة",
+            "فرن",
+            "حلاقة"
+          ]
+        },
+        {
+          "key": "budget",
+          "type": "diplomatic_budget"
+        }
+      ],
+      "max_questions": 2,
+      "stop_when": [
+        "category",
+        "budget"
+      ]
+    },
+    "أدوات_منزلية": {
+      "keywords": [
+        "أدوات",
+        "منزلية",
+        "مطبخ",
+        "أواني",
+        "تنظيف",
+        "ترتيب",
+        "ادوات"
+      ],
+      "multi_category": false,
+      "fallback_tags": [
+        "ادوات منزلية"
+      ],
+      "critical_questions": [
+        {
+          "key": "category",
+          "ask": "لأي غرض تحتاج الأدوات؟",
+          "options": [
+            "مطبخ",
+            "تنظيف",
+            "ترتيب",
+            "حمام"
+          ]
+        },
+        {
+          "key": "budget",
+          "type": "diplomatic_budget"
+        }
+      ],
+      "max_questions": 2,
+      "stop_when": [
+        "category",
+        "budget"
+      ]
+    },
+    "أزياء": {
+      "keywords": [
+        "ملابس",
+        "قميص",
+        "بنطلون",
+        "جاكيت",
+        "بيجامة",
+        "فنيلة",
+        "أزياء",
+        "ازياء",
+        "فستان",
+        "بلوزة",
+        "عباية",
+        "تنورة"
+      ],
+      "multi_category": false,
+      "fallback_tags": [
+        "ازياء رجالي",
+        "ازياء نسائي"
+      ],
+      "critical_questions": [
+        {
+          "key": "gender",
+          "ask": "هل الملابس رجالي، نسائي، أم للأطفال؟",
+          "options": [
+            "رجالي",
+            "نسائي",
+            "أطفال"
+          ]
+        },
+        {
+          "key": "type",
+          "ask": "ما نوع الملابس؟",
+          "options": [
+            "قميص",
+            "بنطلون",
+            "جاكيت",
+            "بيجامة",
+            "فنيلة",
+            "فستان",
+            "بلوزة"
+          ]
+        },
+        {
+          "key": "size",
+          "ask": "ما مقاسك؟",
+          "options": [
+            "S",
+            "M",
+            "L",
+            "XL",
+            "XXL"
+          ],
+          "filter_by": "attribute",
+          "attribute_aliases": [
+            "المقاس",
+            "pa_size",
+            "pa_المقاسات-الملابس"
+          ]
+        }
+      ],
+      "max_questions": 3,
+      "stop_when": [
+        "gender",
+        "type"
+      ]
+    },
+    "العناية_بالبشرة": {
+      "keywords": [
+        "بشرة",
+        "بشره",
+        "تجميل",
+        "مستحضرات",
+        "كريم",
+        "غسول",
+        "سيروم",
+        "مرطب",
+        "واقي شمس",
+        "مقشر",
+        "ماسك",
+        "حبوب",
+        "حب الشباب",
+        "مكياج",
+        "ميكاج",
+        "عروس",
+        "شناطة",
+        "شنطة",
+        "شعر",
+        "شامبو",
+        "بلسم"
+      ],
+      "multi_category": false,
+      "fallback_tags": [
+        "مستحضرات التجميل"
+      ],
+      "critical_questions": [
+        {
+          "key": "need",
+          "ask": "هل تبحث عن عناية بالبشرة، عناية بالشعر، أم مكياج؟",
+          "options": [
+            "بشرة",
+            "شعر",
+            "مكياج"
+          ]
+        },
+        {
+          "key": "purpose",
+          "ask": "ما الغرض الأساسي من المنتج؟",
+          "options": [
+            "تنظيف",
+            "ترطيب",
+            "علاج حبوب",
+            "تفتيح",
+            "حماية من الشمس"
+          ],
+          "affects_search": false,
+          "affects_recommendation": true
+        },
+        {
+          "key": "skin_type",
+          "ask": "ما نوع بشرتك؟",
+          "options": [
+            "دهنية",
+            "جافة",
+            "مختلطة",
+            "حساسة",
+            "عادية"
+          ],
+          "affects_search": false,
+          "affects_recommendation": true
+        },
+        {
+          "key": "skin_tone",
+          "ask": "ما لون بشرتك؟",
+          "options": [
+            "فاتح",
+            "قمحي",
+            "أسمر"
+          ],
+          "affects_search": false,
+          "affects_recommendation": true
+        },
+        {
+          "key": "hair_type",
+          "ask": "ما نوع شعرك؟",
+          "options": [
+            "دهني",
+            "جاف",
+            "تالف",
+            "مصبوغ"
+          ],
+          "affects_search": false,
+          "affects_recommendation": true
+        },
+        {
+          "key": "budget",
+          "type": "diplomatic_budget"
+        }
+      ],
+      "max_questions": 3,
+      "stop_when": [
+        "need",
+        "purpose",
+        "skin_type",
+        "skin_tone",
+        "hair_type"
+      ]
+    },
+    "أطفال": {
+      "keywords": [
+        "أطفال",
+        "اطفال",
+        "طفل",
+        "طفلة",
+        "بيبي",
+        "رضيع",
+        "kids"
+      ],
+      "multi_category": false,
+      "fallback_tags": [
+        "اطفال"
+      ],
+      "critical_questions": [
+        {
+          "key": "category",
+          "ask": "ماذا تحتاج للطفل؟",
+          "options": [
+            "ملابس",
+            "عناية",
+            "أدوات مدرسية",
+            "ألعاب"
+          ]
+        },
+        {
+          "key": "age",
+          "ask": "كم عمر الطفل؟",
+          "options": [
+            "أقل من سنة",
+            "1-3 سنوات",
+            "4-6 سنوات",
+            "7-10 سنوات",
+            "11-14 سنة"
+          ],
+          "affects_search": false,
+          "affects_recommendation": true
+        }
+      ],
+      "max_questions": 2,
+      "stop_when": [
+        "category"
+      ]
+    },
+    "هدية": {
+      "keywords": [
+        "هدية",
+        "هدايا",
+        "gift",
+        "أهدي",
+        "اهديه",
+        "أهديه"
+      ],
+      "multi_category": true,
+      "fallback_tags": [
+        "هدايا",
+        "هدية",
+        "عيد"
+      ],
+      "critical_questions": [
+        {
+          "key": "recipient",
+          "ask": "لمن الهدية؟",
+          "options": [
+            "زوجة",
+            "أم",
+            "أخت",
+            "صديقة",
+            "ابنة",
+            "ابن"
+          ]
+        },
+        {
+          "key": "budget",
+          "type": "diplomatic_budget"
+        }
+      ],
+      "max_questions": 2,
+      "stop_when": [
+        "recipient",
+        "budget"
+      ]
+    },
+    "عناية_شخصية": {
+      "keywords": [
+        "مساج",
+        "تدليك",
+        "مدلك",
+        "جهاز مساج",
+        "مسدس تدليك",
+        "حجامة"
+      ],
+      "multi_category": false,
+      "fallback_tags": [
+        "العنايه الشخصية"
+      ],
+      "critical_questions": [
+        {
+          "key": "category",
+          "ask": "أي نوع من أجهزة العناية الشخصية تحتاج؟",
+          "options": [
+            "مساج",
+            "عناية أخرى"
+          ]
+        },
+        {
+          "key": "budget",
+          "type": "diplomatic_budget"
+        }
+      ],
+      "max_questions": 2,
+      "stop_when": [
+        "category",
+        "budget"
+      ]
+    },
+    "سيارات": {
+      "keywords": [
+        "سيارة",
+        "سيارات",
+        "إطار",
+        "اطار",
+        "منفاخ",
+        "شاشة سيارة",
+        "كاميرا سيارة",
+        "غسيل سيارة"
+      ],
+      "multi_category": false,
+      "fallback_tags": [
+        "اكسسوارات السياره"
+      ],
+      "critical_questions": [
+        {
+          "key": "category",
+          "ask": "ماذا تحتاج لسيارتك؟",
+          "options": [
+            "اكسسوارات",
+            "منافيخ",
+            "شاشات",
+            "كاميرات",
+            "أخرى"
+          ],
+          "affects_search": false,
+          "affects_recommendation": true
+        },
+        {
+          "key": "budget",
+          "type": "diplomatic_budget"
+        }
+      ],
+      "max_questions": 2,
+      "stop_when": [
+        "budget"
+      ]
+    },
+    "مثاقب": {
+      "keywords": [
+        "مثقاب",
+        "دريل",
+        "شاكوش",
+        "مفك كهربائي",
+        "أدوات بناء"
+      ],
+      "multi_category": false,
+      "fallback_tags": [
+        "المثاقب"
+      ],
+      "critical_questions": [
+        {
+          "key": "type",
+          "ask": "هل تبحث عن مثقاب لاسلكي (شحن) أم سلكي؟",
+          "options": [
+            "لاسلكي",
+            "سلكي"
+          ]
+        },
+        {
+          "key": "budget",
+          "type": "diplomatic_budget"
+        }
+      ],
+      "max_questions": 2,
+      "stop_when": [
+        "type",
+        "budget"
+      ]
+    }
+  },
+  "_changelog": {
+    "1.0.0": "الإصدار الأول (11 نوعاً)",
+    "2.0.0": "إصلاح 7 أسئلة ميتة، إضافة map_to لكل سؤال حرج، تصحيح ألعاب→اللعب، إزالة سؤال الجنس من أزياء (رجالي فقط)، إضافة 3 أنواع جديدة (عناية_شخصية، سيارات، مثاقب)، إضافة filter_by/attribute_aliases للأسئلة المتعلقة بالسمات، إضافة affects_search/affects_recommendation للأسئلة المعلوماتية",
+    "2.1.0": "أسئلة التجميل: need وskin_tone وhair_type؛ لون البشرة للمكياج ونوع الشعر للعناية بالشعر فقط"
+  }
+}

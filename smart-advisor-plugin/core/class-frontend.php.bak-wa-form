@@ -1,0 +1,461 @@
+<?php
+/**
+ * Smart Advisor - Frontend
+ *
+ * Version: 2.1.0
+ * 
+ * @package SmartAdvisor
+ */
+
+if ( ! defined( 'ABSPATH' ) ) {
+    exit;
+}
+
+class SA_Frontend {
+
+    const MAX_HISTORY = 20;
+
+    public static function init() {
+        add_action( 'init', array( __CLASS__, 'register_account_endpoint' ), 5 );
+        add_filter( 'query_vars', array( __CLASS__, 'register_account_query_var' ) );
+        // Register the endpoint with WooCommerce as well as WordPress.
+        add_filter( 'woocommerce_get_query_vars', array( __CLASS__, 'register_woocommerce_query_var' ) );
+        // Flush rewrite rules once after an update, after the endpoint is registered.
+        add_action( 'init', array( __CLASS__, 'maybe_flush_account_endpoint_rules' ), 99 );
+        add_filter( 'woocommerce_account_menu_items', array( __CLASS__, 'add_account_menu_item' ) );
+        add_action( 'woocommerce_account_smart-advisor-profile_endpoint', array( __CLASS__, 'render_customer_profile' ) );
+        add_action( 'wp_enqueue_scripts', array( __CLASS__, 'enqueue_assets' ) );
+        add_action( 'wp_footer', array( __CLASS__, 'render' ), 5 );
+        add_action( 'wp_footer', array( __CLASS__, 'render_whatsapp_login_button' ), 6 );
+        add_shortcode( 'sa_wishlist', array( __CLASS__, 'render_wishlist_shortcode' ) );
+        add_filter( 'the_content', array( __CLASS__, 'maybe_render_wishlist_page' ), 20 );
+    }
+
+    public static function enqueue_assets() {
+        $version = defined( 'MBA_VERSION' ) ? MBA_VERSION : '5.4.1';
+        $base    = defined( 'MBA_SANDBOX_URL' ) ? MBA_SANDBOX_URL : plugin_dir_url( dirname( __DIR__ ) . '/smart-advisor.php' );
+        $on_profile = ( function_exists( 'is_wc_endpoint_url' ) && is_wc_endpoint_url( 'smart-advisor-profile' ) )
+            || ( function_exists( 'is_account_page' ) && is_account_page() && get_query_var( 'smart-advisor-profile', false ) !== false );
+        if ( $on_profile ) {
+            wp_enqueue_script( 'sa-profile', $base . 'assets/js/profile.js', array(), $version, true );
+        }
+        if ( ! class_exists( 'SA_Settings' ) || ! SA_Settings::should_display() ) {
+            return;
+        }
+        wp_enqueue_style( 'sa-chat', $base . 'assets/css/chat.css', array(), $version );
+        wp_enqueue_script( 'sa-chat', $base . 'assets/js/chat.js', array(), $version, true );
+        $color    = self::get_safe_color( SA_Settings::get( 'icon_color', '#e91e63' ) );
+        $position = SA_Settings::get( 'position', 'bottom-right' );
+        if ( ! in_array( $position, array( 'bottom-left', 'bottom-right' ), true ) ) {
+            $position = 'bottom-right';
+        }
+        $cs = class_exists( 'SA_Customer_Service_Settings' ) ? SA_Customer_Service_Settings::get_config() : [];
+        wp_localize_script(
+            'sa-chat',
+            'SA_CHAT_CONFIG',
+            array(
+                'endpoint' => self::get_safe_url( rest_url( 'smart-advisor/v1/chat' ) ),
+                'projectsEndpoint' => is_user_logged_in() ? self::get_safe_url( rest_url( 'smart-advisor/v1/profile/projects' ) ) : '',
+                'session'  => self::get_safe_url( rest_url( 'smart-advisor/v1/session' ) ),
+                'nonce'    => wp_create_nonce( 'wp_rest' ),
+                'position' => $position,
+                'color'    => $color,
+                'assistantName' => sanitize_text_field( $cs['assistant_name'] ?? 'مساعد المتجر' ),
+                'welcomeMessage' => sanitize_text_field( $cs['welcome_message'] ?? '' ),
+            )
+        );
+        wp_add_inline_style( 'sa-chat', ':root{--sa-color:' . esc_attr( $color ) . ';}' );
+    }
+
+    public static function register_account_endpoint() {
+        add_rewrite_endpoint( 'smart-advisor-profile', EP_ROOT | EP_PAGES );
+    }
+
+    public static function register_account_query_var( $vars ) {
+        if ( ! in_array( 'smart-advisor-profile', $vars, true ) ) {
+            $vars[] = 'smart-advisor-profile';
+        }
+        return $vars;
+    }
+
+    /** Register the custom endpoint in WooCommerce's endpoint map. */
+    public static function register_woocommerce_query_var( $vars ) {
+        $vars['smart-advisor-profile'] = 'smart-advisor-profile';
+        return $vars;
+    }
+
+    /** Flush rewrite rules once so existing installations pick up the endpoint. */
+    public static function maybe_flush_account_endpoint_rules() {
+        $rewrite_version = '1';
+        if ( get_option( 'sa_smart_advisor_account_endpoint_rewrite_version' ) !== $rewrite_version ) {
+            flush_rewrite_rules( false );
+            update_option( 'sa_smart_advisor_account_endpoint_rewrite_version', $rewrite_version, false );
+        }
+    }
+
+    public static function add_account_menu_item( $items ) {
+        $logout = isset( $items['customer-logout'] ) ? $items['customer-logout'] : null;
+        unset( $items['customer-logout'] );
+        $items['smart-advisor-profile'] = 'مستشاري الشخصي';
+        if ( null !== $logout ) $items['customer-logout'] = $logout;
+        return $items;
+    }
+
+    public static function render_customer_profile() {
+        if ( ! is_user_logged_in() ) {
+            echo '<p dir="rtl">يرجى تسجيل الدخول لعرض ملفك الشخصي.</p>';
+            return;
+        }
+        $project_types = [];
+        if ( class_exists( 'SA_Project_Type_Settings' ) ) {
+            foreach ( SA_Project_Type_Settings::all() as $type_key => $type_config ) {
+                if ( empty( $type_config['enabled'] ) ) continue;
+                $project_types[] = [
+                    'key' => (string) $type_key,
+                    'name' => sanitize_text_field( $type_config['name'] ?? $type_key ),
+                    'questions' => array_values( (array) ( $type_config['questions'] ?? [] ) ),
+                ];
+            }
+        }
+        $config = [
+            'root'  => esc_url_raw( rest_url( 'smart-advisor/v1/' ) ),
+            'nonce' => wp_create_nonce( 'wp_rest' ),
+            'projectTypes' => $project_types,
+        ];
+        ?>
+        <section class="sa-customer-profile" dir="rtl" data-config="<?php echo esc_attr( wp_json_encode( $config ) ); ?>">
+            <style>
+                .sa-customer-profile{max-width:980px;margin:18px auto;color:#222}
+                .sa-customer-profile *{box-sizing:border-box}
+                .sa-profile-card{background:#fff;border:1px solid #e6e8ec;border-radius:14px;padding:18px;margin:0 0 16px}
+                .sa-profile-card h3{margin:0 0 12px;font-size:18px}
+                .sa-profile-muted{color:#68707d;font-size:13px;line-height:1.7}
+                .sa-profile-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}
+                .sa-profile-field{display:flex;flex-direction:column;gap:6px}
+                .sa-profile-field label{font-size:13px;font-weight:700}
+                .sa-profile-field input,.sa-profile-field select,.sa-profile-field textarea{width:100%;min-height:42px;padding:9px 11px;border:1px solid #d7dbe2;border-radius:9px;background:#fff;color:#222}
+                .sa-profile-field textarea{min-height:76px}
+                .sa-profile-actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:14px}
+                .sa-profile-btn{border:0;border-radius:9px;padding:10px 16px;background:#e91e63;color:#fff;font-weight:700;cursor:pointer}
+                .sa-profile-btn.secondary{background:#eef0f3;color:#30343b}
+                .sa-profile-btn.danger{background:#fff0f1;color:#b42335}
+                .sa-profile-status{margin:10px 0;padding:10px 12px;border-radius:9px;background:#f3f6fa;font-size:13px}
+                .sa-profile-status.error{background:#fff0f0;color:#a51d2d}
+                .sa-profile-status.success{background:#effaf2;color:#176b35}
+                .sa-project-item,.sa-recommendation-item{border:1px solid #eceef1;border-radius:10px;padding:12px;margin-top:9px}
+                .sa-project-item{display:flex;justify-content:space-between;gap:12px;align-items:center;flex-wrap:wrap}
+                .sa-project-plan{width:100%;padding:12px;background:#f8f9fb;border-radius:10px;margin-top:8px}
+                .sa-project-plan-group{border-top:1px solid #e3e6eb;padding:10px 0}
+                .sa-project-plan-products{display:grid;grid-template-columns:repeat(auto-fill,minmax(135px,1fr));gap:9px}
+                .sa-project-plan-product{background:#fff;border:1px solid #e6e8ec;border-radius:9px;padding:8px}
+                .sa-project-plan-product img{width:100%;height:95px;object-fit:contain}
+                .sa-project-plan-product a{font-weight:700;color:inherit;text-decoration:none}
+                .sa-recommendations{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:12px}
+                .sa-recommendation-item img{width:100%;height:120px;object-fit:contain;background:#f7f7f8;border-radius:8px}
+                .sa-recommendation-item a{color:inherit;text-decoration:none;font-weight:700}
+                @media(max-width:600px){.sa-profile-grid{grid-template-columns:1fr}.sa-profile-card{padding:14px}.sa-project-item{align-items:flex-start}}
+            </style>
+            <header class="sa-profile-card">
+                <h2 style="margin:0 0 8px">مستشاري الشخصي</h2>
+                <p class="sa-profile-muted">أخبر المستشار بما تفضله وما تخطط لشرائه، ليقترح عليك منتجات أقرب لاحتياجاتك. أنت تتحكم في بياناتك ويمكنك حذفها في أي وقت.</p>
+                <div class="sa-profile-status" data-status aria-live="polite">جارٍ تحميل حالة الخصوصية...</div>
+            </header>
+            <section class="sa-profile-card" data-consent-section>
+                <h3>الخصوصية وحفظ التفضيلات</h3>
+                <p class="sa-profile-muted">عند الموافقة، نحفظ التفضيلات والمشاريع التي تدخلها هنا لاستخدامها في التوصيات الشخصية. لا تُفعّل الحفظ إلا باختيارك.</p>
+                <div class="sa-profile-actions">
+                    <button type="button" class="sa-profile-btn" data-consent="grant">أوافق على حفظ تفضيلاتي</button>
+                    <button type="button" class="sa-profile-btn danger" data-consent="revoke">سحب الموافقة وحذف بياناتي</button>
+                </div>
+            </section>
+            <div data-private-content hidden>
+                <section class="sa-profile-card">
+                    <h3>تفضيلاتي الشرائية</h3>
+                    <p class="sa-profile-muted">يمكن للمستشار اقتراح بعض القيم تلقائياً من مشاهداتك ومفضلاتك ومشترياتك. ستظهر كاقتراحات غير مؤكدة ويمكنك تعديلها أو حذفها. لا تُستبدل القيم التي أدخلتها بنفسك.</p>
+                    <form data-preferences-form>
+                        <div class="sa-profile-grid">
+                            <div class="sa-profile-field"><label>أقل ميزانية مفضلة</label><input name="budget_min" type="number" min="0" step="0.01"></div>
+                            <div class="sa-profile-field"><label>أعلى ميزانية مفضلة</label><input name="budget_max" type="number" min="0" step="0.01"></div>
+                            <div class="sa-profile-field"><label>العملة</label><input name="currency" maxlength="10" placeholder="مثال: YER"></div>
+                            <div class="sa-profile-field"><label>مستوى السعر</label><select name="price_tier"><option value="">غير محدد</option><option value="budget">اقتصادي</option><option value="mid">متوسط</option><option value="premium">فاخر</option></select></div>
+                            <div class="sa-profile-field"><label>الفئات المفضلة (فواصل)</label><input name="favorite_categories" placeholder="أثاث، ساعات، أجهزة"></div>
+                            <div class="sa-profile-field"><label>الألوان المفضلة</label><input name="favorite_colors" placeholder="أسود، أبيض، بني"></div>
+                            <div class="sa-profile-field"><label>التصاميم المفضلة</label><input name="favorite_styles" placeholder="عصري، كلاسيكي"></div>
+                            <div class="sa-profile-field"><label>الخامات المفضلة</label><input name="favorite_materials" placeholder="خشب، جلد، معدن"></div>
+                            <div class="sa-profile-field"><label>العلامات التجارية المفضلة</label><input name="favorite_brands" placeholder="أسماء العلامات"></div>
+                            <div class="sa-profile-field"><label>اهتمامات التسوق</label><input name="shopping_interests" placeholder="تجهيز منزل، أدوات مطبخ"></div>
+                            <div class="sa-profile-field"><label>اهتمامات الهدايا</label><input name="gift_interests" placeholder="هدايا منزلية، مناسبات"></div>
+                            <div class="sa-profile-field"><label>منتجات لا أفضلها</label><input name="disliked_products" placeholder="أنواع أو منتجات لا ترغب بها"></div>
+                        </div>
+                        <div class="sa-profile-actions"><button class="sa-profile-btn" type="submit">حفظ التفضيلات</button></div>
+                    </form>
+                </section>
+                <section class="sa-profile-card">
+                    <h3>مشاريعي واحتياجاتي القادمة</h3>
+                    <form data-project-form>
+                        <div class="sa-profile-grid">
+                            <div class="sa-profile-field"><label>اسم المشروع</label><input name="project_name" maxlength="150" required placeholder="مثال: تجهيز غرفة المعيشة"></div>
+                            <div class="sa-profile-field"><label>نوع المشروع</label><select name="project_type" required><option value="">اختر نوع المشروع</option><?php $shown_types = []; foreach ( (array) ( $config['projectTypes'] ?? [] ) as $project_type ) : $shown_types[] = $project_type['key']; ?><option value="<?php echo esc_attr( $project_type['key'] ); ?>"><?php echo esc_html( $project_type['name'] ); ?></option><?php endforeach; ?><?php foreach ( [ 'construction'=>'بناء', 'renovation'=>'ترميم', 'gift'=>'هدية', 'electronics'=>'أجهزة إلكترونية', 'other'=>'أخرى' ] as $legacy_key => $legacy_name ) : if ( in_array( $legacy_key, $shown_types, true ) ) continue; ?><option value="<?php echo esc_attr( $legacy_key ); ?>"><?php echo esc_html( $legacy_name ); ?></option><?php endforeach; ?></select></div>
+                            <div class="sa-profile-field"><label>الميزانية الدنيا (اختياري)</label><input name="budget_min" type="number" min="0" step="0.01"></div>
+                            <div class="sa-profile-field"><label>الميزانية العليا (اختياري)</label><input name="budget_max" type="number" min="0" step="0.01"></div>
+                            <div class="sa-profile-field"><label>التاريخ المستهدف (اختياري)</label><input name="target_date" type="date"></div>
+                            <div class="sa-profile-field"><label>ملاحظات واحتياجات</label><textarea name="notes" maxlength="2000" placeholder="ما المنتجات أو الأولويات التي تحتاجها؟"></textarea></div>
+                        </div>
+                        <div data-project-questions class="sa-profile-grid" style="margin-top:12px"></div>
+                        <div class="sa-profile-actions"><button class="sa-profile-btn" type="submit">إضافة المشروع</button></div>
+                    </form>
+                    <div data-project-list aria-live="polite"></div>
+                </section>
+                <section class="sa-profile-card">
+                    <h3>منتجات قد تناسبني</h3>
+                    <p class="sa-profile-muted">تعرض هذه القائمة منتجات منشورة ومتوفرة، مرتبة وفق تفاعلاتك وتفضيلاتك ومشاريعك.</p>
+                    <div class="sa-profile-actions"><button type="button" class="sa-profile-btn secondary" data-load-recommendations>عرض توصياتي</button></div>
+                    <div class="sa-recommendations" data-recommendations></div>
+                </section>
+            </div>
+        </section>
+        <?php
+    }
+
+    private static function get_safe_color( $color ) {
+        $color = sanitize_hex_color( $color );
+        return $color ? $color : '#e91e63';
+    }
+
+    private static function get_safe_url( $url ) {
+        if ( ! is_string( $url ) || '' === trim( $url ) ) {
+            return '';
+        }
+        return esc_url( $url, array( 'http', 'https' ) );
+    }
+
+    public static function render_wishlist_shortcode() {
+        ob_start();
+        ?>
+        <div class="sa-wishlist-page" dir="rtl" style="max-width:1100px;margin:20px auto;padding:12px">
+            <h2 style="margin:0 0 16px">♡ قائمة رغباتي</h2>
+            <div class="sa-wishlist-items" aria-live="polite">
+                <p>جارٍ تحميل قائمة رغباتك...</p>
+            </div>
+        </div>
+        <style>
+        .sa-wishlist-page { box-sizing: border-box; width: 100%; }
+        .sa-wishlist-page * { box-sizing: border-box; }
+        .sa-wishlist-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(170px, 1fr)); gap: 14px; }
+        .sa-wishlist-card { border: 1px solid #e5e5e5; border-radius: 12px; overflow: hidden; background: #fff; color: #222; }
+        .sa-wishlist-card img { width: 100%; height: 160px; object-fit: contain; background: #f7f7f7; display: block; }
+        .sa-wishlist-card-body { padding: 10px; }
+        .sa-wishlist-card a { color: inherit; text-decoration: none; }
+        .sa-wishlist-remove { display: block; width: calc(100% - 20px); margin: 9px 10px 10px; padding: 9px; border: 0; border-radius: 8px; background: #fce7eb; color: #b4234d; font-weight: 700; cursor: pointer; }
+        .sa-wishlist-remove:focus-visible { outline: 2px solid #b4234d; outline-offset: 3px; }
+        @media(max-width:480px) { .sa-wishlist-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; } }
+        </style>
+        <script>
+        (function(){
+            'use strict';
+            var scripts = document.querySelectorAll('.sa-wishlist-page');
+            var root = scripts[scripts.length - 1];
+            if (!root || root.dataset.saWishlistReady === '1') return;
+            root.dataset.saWishlistReady = '1';
+
+            var target = root.querySelector('.sa-wishlist-items');
+            if (!target) return;
+
+            var MAX_ITEMS = 100;
+
+            function read() {
+                try {
+                    var value = JSON.parse(localStorage.getItem('sa_wishlist') || '[]');
+                    if (!Array.isArray(value)) return [];
+                    return value.filter(function(item) {
+                        return (item && item.id && typeof item.id === 'string') || (item && item.id && typeof item.id === 'number');
+                    }).slice(0, MAX_ITEMS);
+                } catch(e) { return []; }
+            }
+
+            function write(value) {
+                try {
+                    var unique = [];
+                    value.forEach(function(item) {
+                        if (!item || !item.id) return;
+                        var exists = unique.some(function(x) { return String(x.id) === String(item.id); });
+                        if (!exists) unique.push(item);
+                    });
+                    localStorage.setItem('sa_wishlist', JSON.stringify(unique.slice(0, MAX_ITEMS)));
+                } catch(e) {}
+            }
+
+            function safeURL(value) {
+                try {
+                    var url = new URL(String(value || ''), window.location.origin);
+                    if (url.protocol !== 'http:' && url.protocol !== 'https:') return '';
+                    return url.href;
+                } catch(e) { return ''; }
+            }
+
+            function draw() {
+                var list = read();
+                target.textContent = '';
+                if (!list.length) {
+                    var empty = document.createElement('p');
+                    empty.textContent = 'قائمة رغباتك فارغة. أضف المنتجات من المستشار الذكي.';
+                    target.appendChild(empty);
+                    return;
+                }
+                var grid = document.createElement('div');
+                grid.className = 'sa-wishlist-grid';
+                list.forEach(function(item) {
+                    if (!item || !item.id) return;
+                    var productURL = safeURL(item.url);
+                    if (!productURL) return;
+
+                    var card = document.createElement('article');
+                    card.className = 'sa-wishlist-card';
+                    var link = document.createElement('a');
+                    link.href = productURL;
+
+                    var imageURL = safeURL(item.image);
+                    if (imageURL) {
+                        var img = document.createElement('img');
+                        img.loading = 'lazy';
+                        img.alt = String(item.name || 'منتج');
+                        img.src = imageURL;
+                        link.appendChild(img);
+                    }
+                    var body = document.createElement('div');
+                    body.className = 'sa-wishlist-card-body';
+                    var name = document.createElement('strong');
+                    name.textContent = String(item.name || 'منتج');
+                    body.appendChild(name);
+                    if (item.price) {
+                        var price = document.createElement('p');
+                        price.textContent = String(item.price);
+                        body.appendChild(price);
+                    }
+                    link.appendChild(body);
+                    card.appendChild(link);
+
+                    var remove = document.createElement('button');
+                    remove.type = 'button';
+                    remove.className = 'sa-wishlist-remove';
+                    remove.textContent = 'إزالة من رغباتي';
+                    remove.addEventListener('click', function() {
+                        write(read().filter(function(x) { return String(x.id) !== String(item.id); }));
+                        draw();
+                    });
+                    card.appendChild(remove);
+                    grid.appendChild(card);
+                });
+                if (grid.children.length) {
+                    target.appendChild(grid);
+                } else {
+                    var empty = document.createElement('p');
+                    empty.textContent = 'لا توجد منتجات صالحة للعرض.';
+                    target.appendChild(empty);
+                }
+            }
+
+            window.addEventListener('storage', function(e) {
+                if (e.key === 'sa_wishlist' || e.key === null) draw();
+            });
+            window.addEventListener('sa:wishlist-updated', draw);
+            draw();
+        })();
+        </script>
+        <?php
+        return ob_get_clean();
+    }
+
+    public static function maybe_render_wishlist_page( $content ) {
+        if ( is_admin() || ! is_page( 'wishlist' ) || ! in_the_loop() || ! is_main_query() ) {
+            return $content;
+        }
+        if ( strpos( $content, '[sa_wishlist]' ) !== false ) {
+            return do_shortcode( $content );
+        }
+        return $content . self::render_wishlist_shortcode();
+    }
+
+    public static function render() {
+        if ( ! class_exists( 'SA_Settings' ) || ! SA_Settings::should_display() ) return;
+
+        $position = SA_Settings::get( 'position', 'bottom-right' );
+        if ( ! in_array( $position, array( 'bottom-left', 'bottom-right' ), true ) ) {
+            $position = 'bottom-right';
+        }
+        $symbol = SA_Settings::get( 'icon_symbol', '💬' );
+        $pos_class = 'bottom-left' === $position ? 'sa-pos-left' : 'sa-pos-right';
+        ?>
+<button id="sa-toggle" class="<?php echo esc_attr( $pos_class ); ?>" type="button" aria-label="<?php echo esc_attr( 'فتح ' . ( class_exists( 'SA_Customer_Service_Settings' ) ? SA_Customer_Service_Settings::get_config()['assistant_name'] : 'المستشار الذكي' ) ); ?>" aria-controls="sa-panel" aria-expanded="false">
+    <?php echo esc_html( $symbol ); ?>
+</button>
+
+<div id="sa-panel" role="dialog" aria-label="<?php echo esc_attr( class_exists( 'SA_Customer_Service_Settings' ) ? SA_Customer_Service_Settings::get_config()['assistant_name'] : 'المستشار الذكي' ); ?>" aria-hidden="true">
+    <div id="sa-head">
+        <span><?php echo esc_html( class_exists( 'SA_Customer_Service_Settings' ) ? SA_Customer_Service_Settings::get_config()['assistant_name'] : 'المستشار الذكي' ); ?></span>
+        <button id="sa-close" type="button" aria-label="إغلاق المستشار">×</button>
+    </div>
+    <div id="sa-msgs" aria-live="polite" aria-relevant="additions"></div>
+    <?php if ( is_user_logged_in() ) : ?><label class="sa-project-chat-label" style="display:block;padding:6px 12px;font-size:12px">المشروع المرتبط بالمحادثة <select id="sa-chat-project" style="width:100%;padding:7px;border:1px solid #ddd;border-radius:7px"><option value="">محادثة عامة — دون ربط مشروع</option></select></label><?php endif; ?>
+    <p class="sa-privacy-note">الرسائل تُرسل إلى مزود ذكاء اصطناعي خارجي لتوليد الردود. لا تشارك بيانات شخصية حساسة.</p>
+    <form id="sa-form">
+        <input type="text" id="sa-input" placeholder="اكتب سؤالك..." autocomplete="off" maxlength="500" aria-label="اكتب سؤالك">
+        <button type="submit" id="sa-send">إرسال</button>
+    </form>
+</div>
+        <?php
+    }
+
+    public static function render_whatsapp_login_button() {
+        if ( is_admin() || ! function_exists( 'is_account_page' ) || ! is_account_page() || is_user_logged_in() ) return;
+        $wa_number = '';
+        if ( class_exists( 'SA_WhatsApp_Settings' ) ) {
+            $cfg = SA_WhatsApp_Settings::get_config();
+            $wa_number = $cfg['whatsapp_number'] ?? '';
+        }
+        if ( empty( $wa_number ) ) $wa_number = get_option( 'sa_whatsapp_business_number', '' );
+        if ( empty( $wa_number ) ) return;
+        $wa_number = preg_replace( '/[^0-9]/', '', $wa_number );
+        ?>
+        <style>
+        #sa-wa-login-box { max-width:480px; margin:20px auto; padding:20px; border:2px solid #25D366; border-radius:10px; background:#f0fff4; text-align:center; }
+        #sa-wa-login-box h3 { margin:0 0 10px; color:#075E54; font-size:18px; }
+        #sa-wa-login-box p { margin:0 0 15px; font-size:14px; color:#444; }
+        #sa-wa-phone-input { width:100%; padding:12px; margin-bottom:15px; border:1px solid #ccc; border-radius:8px; font-size:16px; text-align:center; box-sizing:border-box; }
+        #sa-wa-login-btn { display:block; width:100%; padding:12px; background:#25D366; color:#fff; text-decoration:none; border-radius:8px; font-weight:bold; font-size:15px; border:none; cursor:pointer; box-sizing:border-box; transition:background 0.3s; }
+        #sa-wa-login-btn:hover { background:#1da851; }
+        </style>
+        <script>
+        (function(){
+            function inject() {
+                if (document.getElementById('sa-wa-login-box')) return;
+                var form = document.querySelector('.woocommerce-form-login, .woocommerce-form-register, .u-column1, .u-column2');
+                var box = document.createElement('div');
+                box.id = 'sa-wa-login-box';
+                box.innerHTML = '<h3>📱 أو سجل الدخول عبر واتساب</h3>' +
+                    '<p>أدخل رقم جوالك المسجل في المتجر، وسنرسل لك رابط دخول سري عبر واتساب.</p>' +
+                    '<input type="tel" id="sa-wa-phone-input" placeholder="مثال: 777123456" dir="ltr" />' +
+                    '<button id="sa-wa-login-btn">📲 إرسال رابط الدخول عبر واتساب</button>';
+                form.parentNode.insertBefore(box, form.nextSibling);
+
+                document.getElementById('sa-wa-login-btn').addEventListener('click', function(e) {
+                    e.preventDefault();
+                    var phone = document.getElementById('sa-wa-phone-input').value.replace(/[^0-9]/g, '');
+                    if (phone.length < 9 || phone.length > 15) {
+                        alert('يرجى إدخال رقم جوال صحيح (9 إلى 15 رقماً).');
+                        return;
+                    }
+                    // إرسال "اربط حسابي 777xxxxxx" إلى البوت
+                    var text = 'اربط حسابي ' + phone;
+                    var url = 'https://wa.me/<?php echo esc_js( $wa_number ); ?>?text=' + encodeURIComponent(text);
+                    window.open(url, '_blank');
+                });
+            }
+            if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', inject);
+            else inject();
+        })();
+        </script>
+        <?php
+    }
+
+}
