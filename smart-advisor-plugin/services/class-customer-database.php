@@ -6,7 +6,7 @@
 if ( ! defined( 'ABSPATH' ) ) exit;
 
 class SA_Customer_Database {
-    const DB_VERSION = '1.4.0';
+    const DB_VERSION = '1.5.0';
     const DB_VERSION_OPTION = 'sa_customer_db_version';
 
     /** Database upgrades are invoked directly from the plugin's plugins_loaded callback. */
@@ -37,6 +37,8 @@ class SA_Customer_Database {
         $project_progress = $wpdb->prefix . 'sa_project_progress';
         $automate_memories = $wpdb->prefix . 'sa_automate_memories';
         $automate_events = $wpdb->prefix . 'sa_automate_memory_events';
+        $whatsapp_inbox = $wpdb->prefix . 'sa_whatsapp_inbox';
+        $action_idempotency = $wpdb->prefix . 'sa_action_idempotency';
 
         $sql = [];
         $sql[] = "CREATE TABLE {$profiles} (
@@ -191,12 +193,51 @@ class SA_Customer_Database {
             KEY created_at (created_at)
         ) {$charset_collate};";
 
+        $sql[] = "CREATE TABLE {$whatsapp_inbox} (
+            id bigint(20) unsigned NOT NULL AUTO_INCREMENT,
+            provider varchar(40) NOT NULL DEFAULT 'generic',
+            message_id varchar(191) NOT NULL,
+            sender_hash char(64) NOT NULL DEFAULT '',
+            owner_token char(36) DEFAULT NULL,
+            status varchar(20) NOT NULL DEFAULT 'PROCESSING',
+            response_payload longtext DEFAULT NULL,
+            http_status smallint(6) NOT NULL DEFAULT 200,
+            created_at datetime NOT NULL,
+            updated_at datetime NOT NULL,
+            lease_expires_at datetime DEFAULT NULL,
+            attempt_count int(10) unsigned NOT NULL DEFAULT 1,
+            last_error text DEFAULT NULL,
+            PRIMARY KEY  (id),
+            UNIQUE KEY provider_message (provider,message_id),
+            KEY status_lease (status,lease_expires_at),
+            KEY sender_updated (sender_hash,updated_at)
+        ) {$charset_collate};";
+
+        $sql[] = "CREATE TABLE {$action_idempotency} (
+            id bigint(20) unsigned NOT NULL AUTO_INCREMENT,
+            scope varchar(40) NOT NULL,
+            idempotency_key varchar(191) NOT NULL,
+            actor_hash char(64) NOT NULL DEFAULT '',
+            owner_token char(36) DEFAULT NULL,
+            status varchar(20) NOT NULL DEFAULT 'PROCESSING',
+            response_payload longtext DEFAULT NULL,
+            http_status smallint(6) NOT NULL DEFAULT 200,
+            created_at datetime NOT NULL,
+            updated_at datetime NOT NULL,
+            lease_expires_at datetime DEFAULT NULL,
+            attempt_count int(10) unsigned NOT NULL DEFAULT 1,
+            last_error text DEFAULT NULL,
+            PRIMARY KEY  (id),
+            UNIQUE KEY scope_key (scope,idempotency_key),
+            KEY status_lease (status,lease_expires_at)
+        ) {$charset_collate};";
+
         foreach ( $sql as $statement ) {
             dbDelta( $statement );
         }
 
         $missing = [];
-        foreach ( [ $profiles, $searches, $sizes, $preferences, $summaries, $projects, $events, $project_progress, $automate_memories, $automate_events ] as $table_name ) {
+        foreach ( [ $profiles, $searches, $sizes, $preferences, $summaries, $projects, $events, $project_progress, $automate_memories, $automate_events, $whatsapp_inbox, $action_idempotency ] as $table_name ) {
             $exists = $wpdb->get_var( $wpdb->prepare( 'SHOW TABLES LIKE %s', $table_name ) );
             if ( $exists !== $table_name ) { $missing[] = $table_name; }
         }

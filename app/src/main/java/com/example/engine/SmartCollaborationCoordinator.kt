@@ -50,7 +50,8 @@ class SmartCollaborationCoordinator(
         val isGroup: Boolean = false,
         val messageText: String,
         val isSandbox: Boolean = false,
-        val conversationKeyOverride: String? = null
+        val conversationKeyOverride: String? = null,
+        val messageId: String = ""
     )
 
     data class CollaborationOutcome(
@@ -233,7 +234,8 @@ class SmartCollaborationCoordinator(
                     action = decision1.accountAction,
                     customerKey = contextEntity.customerKey,
                     phone = input.phone,
-                    name = input.senderName
+                    name = input.senderName,
+                    idempotencyKey = if (input.isSandbox) null else input.messageId.ifBlank { null }
                 )
                 latencies["sa_account_action"] = (clockMs() - actionStart).coerceAtLeast(0L)
 

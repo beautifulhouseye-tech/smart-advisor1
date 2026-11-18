@@ -309,13 +309,73 @@ class Core_Chat_Controller {
             } );
         }
 
-        // 2) Rate limit
+        // 1.5) Optional client idempotency key (Idempotency-Key / X-Message-ID / message_id)
+        $idem_raw = '';
+        foreach ( [
+            $request->get_header( 'Idempotency-Key' ),
+            $request->get_header( 'X-Message-ID' ),
+            $request->get_param( 'message_id' ),
+        ] as $cand ) {
+            if ( is_scalar( $cand ) && '' !== trim( (string) $cand ) ) {
+                $idem_raw = (string) $cand;
+                break;
+            }
+        }
+        $chat_lock_id = 0;
+        $chat_owner_token = '';
+        if ( '' !== $idem_raw && class_exists( 'SA_WhatsApp_Inbox' ) ) {
+            $idem_key = SA_WhatsApp_Inbox::normalize_message_id( $idem_raw );
+            if ( '' !== $idem_key ) {
+                $actor = is_user_logged_in() ? 'u:' . get_current_user_id() : 'ip:' . self::get_client_ip();
+                $acq = SA_WhatsApp_Inbox::acquire_action( 'web_chat_' . substr( SA_WhatsApp_Inbox::hash_value( $actor ), 0, 12 ), $idem_key, SA_WhatsApp_Inbox::hash_value( $actor ) );
+                if ( 'replay' === $acq['outcome'] || 'failed_permanent' === $acq['outcome'] ) {
+                    return SA_WhatsApp_Inbox::replay_response_from_row( $acq['row'] );
+                }
+                if ( 'in_flight' === $acq['outcome'] ) {
+                    $resp = new WP_REST_Response( [ 'error' => 'الطلب قيد المعالجة حالياً.' ], 409 );
+                    $resp->header( 'Idempotency-Supported', 'true' );
+                    $resp->header( 'Retry-After', (string) ( $acq['retry_after'] ?? 5 ) );
+                    return $resp;
+                }
+                if ( 'acquired' === $acq['outcome'] ) {
+                    $chat_lock_id = (int) $acq['id'];
+                    $chat_owner_token = (string) $acq['owner_token'];
+                }
+            }
+        }
+
+        // 2) Rate limit (charged ONLY for non-replayed requests)
         if ( ! self::rate_limit_check() ) {
+            if ( $chat_lock_id > 0 && '' !== $chat_owner_token && class_exists( 'SA_WhatsApp_Inbox' ) ) {
+                SA_WhatsApp_Inbox::fail_action( $chat_lock_id, $chat_owner_token, 'RETRYABLE', 'rate_limited', null, 429 );
+            }
             return new WP_REST_Response(
                 [ 'error' => 'تم تجاوز عدد الطلبات المسموح به. يرجى المحاولة بعد دقيقة.' ],
                 429
             );
         }
+
+        try {
+            $result = self::handle_inner( $request );
+            if ( $chat_lock_id > 0 && '' !== $chat_owner_token && class_exists( 'SA_WhatsApp_Inbox' ) && $result instanceof WP_REST_Response ) {
+                $status = $result->get_status();
+                if ( $status >= 200 && $status < 300 ) {
+                    SA_WhatsApp_Inbox::complete_action( $chat_lock_id, $chat_owner_token, $result->get_data(), $status );
+                } else {
+                    SA_WhatsApp_Inbox::fail_action( $chat_lock_id, $chat_owner_token, 'RETRYABLE', 'chat_http_' . $status, null, $status );
+                }
+                $result->header( 'Idempotency-Supported', 'true' );
+            }
+            return $result;
+        } catch ( Throwable $e ) {
+            if ( $chat_lock_id > 0 && '' !== $chat_owner_token && class_exists( 'SA_WhatsApp_Inbox' ) ) {
+                SA_WhatsApp_Inbox::fail_action( $chat_lock_id, $chat_owner_token, 'RETRYABLE', $e->getMessage(), null, 503 );
+            }
+            throw $e;
+        }
+    }
+
+    private static function handle_inner( WP_REST_Request $request ) {
 
         // 3) Sanitize message
         $raw = $request->get_param( 'message' );

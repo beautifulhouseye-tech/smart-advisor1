@@ -110,6 +110,18 @@ class SA_AutoMate_Integration {
         }
     }
 
+    private static function respond( $data, $status = 200, $replayed = false, $extra_headers = [] ) {
+        $resp = new WP_REST_Response( $data, (int) $status );
+        $resp->header( 'Idempotency-Supported', 'true' );
+        if ( $replayed ) {
+            $resp->header( 'Idempotency-Replayed', 'true' );
+        }
+        foreach ( $extra_headers as $h_name => $h_val ) {
+            $resp->header( $h_name, (string) $h_val );
+        }
+        return $resp;
+    }
+
     // -------------------------------------------------------------------------
     // 1. Capabilities Endpoint (GET /whatsapp/assistant/capabilities)
     // -------------------------------------------------------------------------
@@ -129,10 +141,10 @@ class SA_AutoMate_Integration {
             ? trim( wp_strip_all_tags( html_entity_decode( (string) get_bloginfo( 'name' ), ENT_QUOTES, 'UTF-8' ) ) )
             : '';
 
-        return rest_ensure_response( [
+        return self::respond( [
             'ok'                      => true,
             'integration'             => 'automate_smart_cooperation',
-            'version'                 => defined( 'MBA_VERSION' ) ? MBA_VERSION : '6.5.2',
+            'version'                 => defined( 'MBA_VERSION' ) ? MBA_VERSION : '6.5.3',
             'store_name'              => $store_name,
             // Boolean capability flags expected directly by AutoMate SmartAdvisorClient:
             'knowledge'               => $knowledge_enabled,
@@ -166,7 +178,7 @@ class SA_AutoMate_Integration {
                 'max_bytes'                 => self::MAX_MEMORY_BYTES,
                 'requires_customer_consent' => true,
             ],
-        ] );
+        ], 200 );
     }
 
     // -------------------------------------------------------------------------
@@ -210,7 +222,7 @@ class SA_AutoMate_Integration {
                 return new WP_Error( 'sa_memory_delete_failed', 'تعذر حذف خلاصة الذاكرة.', [ 'status' => 500 ] );
             }
             $remaining = self::read_domain_memory( $customer_key, $user_id, 'all' );
-            return rest_ensure_response( [
+            return self::respond( [
                 'ok'               => true,
                 'success'          => true,
                 'deleted'          => true,
@@ -218,19 +230,19 @@ class SA_AutoMate_Integration {
                 'consent_required' => false,
                 'revision'         => (int) ( $remaining['revision'] ?? 0 ),
                 'memory'           => $remaining['memory'],
-            ] );
+            ], 200 );
         }
 
         // Respect WordPress-level consent revocation when linked to a registered account.
         if ( self::is_wp_consent_revoked( $user_id ) ) {
-            return rest_ensure_response( [
+            return self::respond( [
                 'ok'               => false,
                 'found'            => true,
                 'consent_required' => true,
                 'revision'         => 0,
                 'memory'           => null,
                 'error'            => 'تم سحب موافقة حفظ التفضيلات من ملف العميل.',
-            ] );
+            ], 200 );
         }
 
         $current_state = self::read_domain_memory( $customer_key, $user_id, $domain_param ?: 'all' );
@@ -239,14 +251,14 @@ class SA_AutoMate_Integration {
         if ( 'save' === $action ) {
             $consent_confirmed = self::has_save_consent( $request, $user_id, $current_state['consent_granted'] );
             if ( ! $consent_confirmed ) {
-                return rest_ensure_response( [
+                return self::respond( [
                     'ok'               => false,
                     'found'            => $current_state['found'],
                     'consent_required' => true,
                     'revision'         => $current_revision,
                     'memory'           => null,
                     'error'            => 'موافقة العميل مطلوبة قبل حفظ الذاكرة الدائمة.',
-                ] );
+                ], 200 );
             }
 
             $raw_memory = $request->get_param( 'memory' );
@@ -261,19 +273,19 @@ class SA_AutoMate_Integration {
 
             $event_id = self::resolve_event_id( $request );
             if ( '' !== $event_id && self::is_duplicate_event( $customer_key, $event_id, $current_state['last_event_id'] ) ) {
-                return rest_ensure_response( [
+                return self::respond( [
                     'ok'               => true,
                     'success'          => true,
                     'duplicate'        => true,
                     'consent_required' => false,
                     'revision'         => $current_revision,
                     'memory'           => $current_state['memory'],
-                ] );
+                ], 200, true );
             }
 
             $incoming_revision = absint( $request->get_param( 'revision' ) );
             if ( $current_revision > 0 && $incoming_revision > 0 && $incoming_revision <= $current_revision ) {
-                return new WP_REST_Response( [
+                return self::respond( [
                     'ok'               => false,
                     'conflict'         => true,
                     'consent_required' => false,
@@ -303,7 +315,7 @@ class SA_AutoMate_Integration {
             }
 
             $after = self::read_domain_memory( $customer_key, $user_id, $domain_param ?: 'all' );
-            return rest_ensure_response( [
+            return self::respond( [
                 'ok'               => true,
                 'success'          => true,
                 'saved'            => true,
@@ -311,39 +323,39 @@ class SA_AutoMate_Integration {
                 'revision'         => (int) $after['revision'],
                 'updated_at'       => $saved['updated_at'],
                 'memory'           => $after['memory'],
-            ] );
+            ], 200 );
         }
 
         // Action = "get": return memory only when consent exists or legacy WP account consented.
         $has_read_consent = $current_state['consent_granted'] || self::has_wp_consent( $user_id );
         if ( $current_state['found'] && ! $has_read_consent ) {
-            return rest_ensure_response( [
+            return self::respond( [
                 'ok'               => false,
                 'found'            => true,
                 'consent_required' => true,
                 'revision'         => $current_revision,
                 'memory'           => null,
                 'error'            => 'موافقة العميل مطلوبة لقراءة الذاكرة الدائمة.',
-            ] );
+            ], 200 );
         }
 
         if ( ! $current_state['found'] && null === $current_state['memory'] ) {
-            return rest_ensure_response( [
+            return self::respond( [
                 'ok'               => true,
                 'found'            => false,
                 'consent_required' => false,
                 'revision'         => 0,
                 'memory'           => null,
-            ] );
+            ], 200 );
         }
 
-        return rest_ensure_response( [
+        return self::respond( [
             'ok'               => true,
             'found'            => true,
             'consent_required' => false,
             'revision'         => $current_revision,
             'memory'           => $current_state['memory'],
-        ] );
+        ], 200 );
     }
 
     // -------------------------------------------------------------------------
@@ -391,7 +403,7 @@ class SA_AutoMate_Integration {
         $summary = self::build_knowledge_summary( $intent, $facts, $products );
         $has_verified = ! empty( $facts ) || ! empty( $products );
 
-        return rest_ensure_response( [
+        return self::respond( [
             'ok'                => true,
             'source'            => 'smart_advisor_woocommerce',
             'intent'            => $intent,
@@ -401,7 +413,7 @@ class SA_AutoMate_Integration {
             'products'          => $products,
             'has_verified_data' => $has_verified,
             'instruction'       => 'هذه بيانات متجر موثوقة. لا تخترع حقائق أو أسعاراً غير موجودة، وصغ الرد النهائي في AutoMate AI.',
-        ] );
+        ], 200 );
     }
 
     // -------------------------------------------------------------------------
@@ -412,6 +424,18 @@ class SA_AutoMate_Integration {
     public static function account_action( $request ) {
         if ( ! self::enabled( 'integration_enabled' ) ) {
             return new WP_Error( 'sa_automate_integration_disabled', 'تكامل AutoMate AI غير مفعّل.', [ 'status' => 403 ] );
+        }
+        self::ensure_schema();
+
+        if ( class_exists( 'SA_WhatsApp_Inbox' ) && SA_WhatsApp_Inbox::detect_is_group( $request ) ) {
+            return self::respond( [
+                'ok'              => false,
+                'success'         => false,
+                'status'          => 'group_not_allowed',
+                'account_created' => false,
+                'link_created'    => false,
+                'message'         => 'لحماية خصوصية حسابك، لا يمكن تنفيذ إجراءات الحساب داخل المجموعات.',
+            ], 403 );
         }
 
         $action       = sanitize_key( (string) $request->get_param( 'action' ) );
@@ -438,7 +462,7 @@ class SA_AutoMate_Integration {
 
         $min_digits = ( 'magic_login' === $action ) ? 7 : 9;
         if ( strlen( $phone ) < $min_digits || strlen( $phone ) > 15 ) {
-            return rest_ensure_response( [
+            return self::respond( [
                 'ok'              => false,
                 'success'         => false,
                 'action'          => $action,
@@ -446,102 +470,234 @@ class SA_AutoMate_Integration {
                 'account_created' => false,
                 'link_created'    => false,
                 'message'         => 'يرجى تزويدنا برقم جوال صحيح (9 أرقام على الأقل) لإتمام طلب الحساب.',
-            ] );
+            ], 200 );
         }
 
-        $rate_identity = '' !== $sender ? $sender : ( '' !== $customer_key ? $customer_key : $phone );
-        if ( ! class_exists( 'SA_WhatsApp_Magic_Link' ) || ! SA_WhatsApp_Magic_Link::check_rate_limit( 'automate_' . $action . '_' . md5( $rate_identity ) ) ) {
-            return new WP_Error( 'sa_account_rate_limited', 'تجاوزت حد محاولات الحساب. حاول لاحقاً.', [ 'status' => 429 ] );
-        }
-
-        if ( 'magic_login' === $action ) {
-            $uid = SA_WhatsApp_Magic_Link::find_user_by_phone( $phone );
-            if ( ! $uid ) {
-                return rest_ensure_response( [
+        if ( class_exists( 'SA_WhatsApp_Inbox' ) ) {
+            $ownership = SA_WhatsApp_Inbox::verify_sender_phone_ownership( $request, $phone, self::config() );
+            if ( empty( $ownership['allowed'] ) ) {
+                return self::respond( [
                     'ok'              => false,
                     'success'         => false,
                     'action'          => $action,
-                    'status'          => 'account_not_found',
+                    'status'          => 'ownership_verification_failed',
                     'account_created' => false,
                     'link_created'    => false,
-                    'message'         => 'لم نجد حساباً مسجلاً بهذا الرقم في المتجر.',
-                ] );
+                    'message'         => 'تعذر التحقق من ملكية رقم الهاتف لهذا الطلب.',
+                ], 403 );
             }
-            $url = SA_WhatsApp_Magic_Link::generate_token( $uid );
-            if ( ! $url ) {
-                return new WP_Error( 'sa_magic_link_failed', 'تعذر إنشاء رابط الدخول.', [ 'status' => 500 ] );
-            }
-            $safe_url = esc_url_raw( $url );
-            return rest_ensure_response( [
-                'ok'                  => true,
-                'success'             => true,
-                'action'              => $action,
-                'status'              => 'link_created',
-                'account_created'     => false,
-                'link_created'        => true,
-                'login_url'           => $safe_url,
-                'magic_link'          => $safe_url,
-                'ephemeral_login_url' => $safe_url,
-                'url'                 => $safe_url,
-                'message'             => 'تم إنشاء رابط الدخول السريع المؤقت بنجاح (صالح لمدة 10 دقائق وللاستخدام مرة واحدة).',
-                'expires_in_seconds'  => SA_WhatsApp_Magic_Link::TOKEN_TTL,
-                'single_use'          => true,
-            ] );
         }
 
-        if ( ! class_exists( 'SA_WhatsApp_Registration' ) ) {
-            return new WP_Error( 'sa_registration_unavailable', 'التسجيل غير متاح حالياً.', [ 'status' => 503 ] );
+        // Action idempotency (Idempotency-Key / X-Message-ID / event_id / message_id)
+        $idem_key = self::resolve_action_idempotency_key( $request );
+        $lock_id = 0;
+        $owner_token = '';
+        $lock_closed = false;
+
+        if ( '' !== $idem_key && class_exists( 'SA_WhatsApp_Inbox' ) ) {
+            $actor_seed = '' !== $customer_key ? $customer_key : ( '' !== $sender ? $sender : $phone );
+            $acq = SA_WhatsApp_Inbox::acquire_action( 'automate_account_' . $action, $idem_key, SA_WhatsApp_Inbox::hash_value( $actor_seed ) );
+            if ( 'replay' === $acq['outcome'] || 'failed_permanent' === $acq['outcome'] ) {
+                return SA_WhatsApp_Inbox::replay_response_from_row( $acq['row'] );
+            }
+            if ( 'in_flight' === $acq['outcome'] ) {
+                return self::respond(
+                    [ 'ok' => false, 'error' => 'طلب الحساب قيد التنفيذ حالياً.', 'status' => 'processing' ],
+                    409,
+                    false,
+                    [ 'Retry-After' => (int) ( $acq['retry_after'] ?? 5 ) ]
+                );
+            }
+            if ( 'db_error' === $acq['outcome'] ) {
+                return new WP_Error( 'sa_account_inbox_error', 'الخدمة غير متاحة مؤقتاً.', [ 'status' => 503 ] );
+            }
+            if ( 'acquired' === $acq['outcome'] ) {
+                $lock_id     = (int) $acq['id'];
+                $owner_token = (string) $acq['owner_token'];
+            }
         }
 
-        list( $uid, $is_new, $error ) = SA_WhatsApp_Registration::find_or_create( $phone );
-        if ( $is_new && $uid ) {
-            if ( '' !== $name && function_exists( 'update_user_meta' ) ) {
-                update_user_meta( $uid, 'first_name', $name );
+        $finish_ok = function( $payload, $status = 200 ) use ( &$lock_closed, $lock_id, $owner_token ) {
+            $lock_closed = true;
+            if ( $lock_id > 0 && '' !== $owner_token && class_exists( 'SA_WhatsApp_Inbox' ) ) {
+                SA_WhatsApp_Inbox::complete_action( $lock_id, $owner_token, $payload, $status );
             }
-            if ( '' !== $email && is_email( $email ) && ! email_exists( $email ) && function_exists( 'wp_update_user' ) ) {
-                wp_update_user( [ 'ID' => $uid, 'user_email' => $email ] );
-            }
-            $url = SA_WhatsApp_Registration::generate_setup_link( $uid );
-            $safe_url = esc_url_raw( $url );
-            return rest_ensure_response( [
-                'ok'                  => true,
-                'success'             => true,
-                'action'              => $action,
-                'status'              => 'account_created',
-                'account_created'     => true,
-                'link_created'        => '' !== $safe_url,
-                'login_url'           => $safe_url,
-                'magic_link'          => $safe_url,
-                'ephemeral_login_url' => $safe_url,
-                'url'                 => $safe_url,
-                'message'             => 'تم إنشاء حسابك في المتجر وإعداد رابط التفعيل وتعيين كلمة المرور (صالح لمدة 24 ساعة).',
-                'expires_in_seconds'  => 86400,
-                'single_use'          => true,
-            ] );
-        }
+            return self::respond( $payload, $status );
+        };
 
-        if ( 'exists' === $error ) {
-            return rest_ensure_response( [
-                'ok'              => true,
-                'success'         => true,
+        $finish_err = function( $inbox_status, $msg, $payload, $status = 503 ) use ( &$lock_closed, $lock_id, $owner_token ) {
+            $lock_closed = true;
+            if ( $lock_id > 0 && '' !== $owner_token && class_exists( 'SA_WhatsApp_Inbox' ) ) {
+                SA_WhatsApp_Inbox::fail_action( $lock_id, $owner_token, $inbox_status, $msg, $payload, $status );
+            }
+            return self::respond( $payload, $status );
+        };
+
+        try {
+            $rate_identity = '' !== $sender ? $sender : ( '' !== $customer_key ? $customer_key : $phone );
+            if ( ! class_exists( 'SA_WhatsApp_Magic_Link' ) || ! SA_WhatsApp_Magic_Link::check_rate_limit( 'automate_' . $action . '_' . md5( $rate_identity ) ) ) {
+                return $finish_err( 'RETRYABLE', 'rate_limited', [ 'ok' => false, 'error' => 'تجاوزت حد محاولات الحساب. حاول لاحقاً.' ], 429 );
+            }
+
+            if ( 'magic_login' === $action ) {
+                $uid = SA_WhatsApp_Magic_Link::find_user_by_phone( $phone );
+                if ( ! $uid ) {
+                    return $finish_ok( [
+                        'ok'              => false,
+                        'success'         => false,
+                        'action'          => $action,
+                        'status'          => 'account_not_found',
+                        'account_created' => false,
+                        'link_created'    => false,
+                        'message'         => 'لم نجد حساباً مسجلاً بهذا الرقم في المتجر.',
+                    ], 200 );
+                }
+                if ( class_exists( 'SA_WhatsApp_Registration' ) && SA_WhatsApp_Registration::is_pending( $uid ) ) {
+                    $url = SA_WhatsApp_Registration::generate_setup_link( $uid );
+                    $safe_url = esc_url_raw( $url );
+                    return $finish_ok( [
+                        'ok'                  => '' !== $safe_url,
+                        'success'             => '' !== $safe_url,
+                        'action'              => $action,
+                        'status'              => 'activation_required',
+                        'account_created'     => false,
+                        'link_created'        => '' !== $safe_url,
+                        'login_url'           => $safe_url,
+                        'ephemeral_login_url' => $safe_url,
+                        'url'                 => $safe_url,
+                        'message'             => 'الحساب بانتظار التفعيل وتعيين كلمة المرور أولاً (صالح لمدة 24 ساعة).',
+                        'expires_in_seconds'  => 86400,
+                        'single_use'          => true,
+                    ], 200 );
+                }
+                if ( ! SA_WhatsApp_Magic_Link::is_user_eligible( $uid ) ) {
+                    return $finish_ok( [
+                        'ok'              => false,
+                        'success'         => false,
+                        'action'          => $action,
+                        'status'          => 'account_ineligible',
+                        'account_created' => false,
+                        'link_created'    => false,
+                        'message'         => 'تعذر إنشاء رابط دخول لهذا الحساب عبر واتساب.',
+                    ], 200 );
+                }
+                $url = SA_WhatsApp_Magic_Link::generate_token( $uid );
+                if ( ! $url ) {
+                    return $finish_err( 'RETRYABLE', 'magic_link_failed', [ 'ok' => false, 'error' => 'تعذر إنشاء رابط الدخول.' ], 500 );
+                }
+                $safe_url = esc_url_raw( $url );
+                return $finish_ok( [
+                    'ok'                  => true,
+                    'success'             => true,
+                    'action'              => $action,
+                    'status'              => 'link_created',
+                    'account_created'     => false,
+                    'link_created'        => true,
+                    'login_url'           => $safe_url,
+                    'magic_link'          => $safe_url,
+                    'ephemeral_login_url' => $safe_url,
+                    'url'                 => $safe_url,
+                    'message'             => 'تم إنشاء رابط الدخول السريع المؤقت بنجاح (صالح لمدة 10 دقائق وللاستخدام مرة واحدة).',
+                    'expires_in_seconds'  => SA_WhatsApp_Magic_Link::TOKEN_TTL,
+                    'single_use'          => true,
+                ], 200 );
+            }
+
+            if ( ! class_exists( 'SA_WhatsApp_Registration' ) ) {
+                return $finish_err( 'RETRYABLE', 'registration_unavailable', [ 'ok' => false, 'error' => 'التسجيل غير متاح حالياً.' ], 503 );
+            }
+
+            list( $uid, $is_new, $error ) = SA_WhatsApp_Registration::find_or_create( $phone );
+            if ( $is_new && $uid ) {
+                if ( '' !== $name && function_exists( 'update_user_meta' ) ) {
+                    update_user_meta( $uid, 'first_name', $name );
+                }
+                if ( '' !== $email && is_email( $email ) && ! email_exists( $email ) && function_exists( 'wp_update_user' ) ) {
+                    wp_update_user( [ 'ID' => $uid, 'user_email' => $email ] );
+                }
+                $url = SA_WhatsApp_Registration::generate_setup_link( $uid );
+                $safe_url = esc_url_raw( $url );
+                return $finish_ok( [
+                    'ok'                  => true,
+                    'success'             => true,
+                    'action'              => $action,
+                    'status'              => 'account_created',
+                    'account_created'     => true,
+                    'link_created'        => '' !== $safe_url,
+                    'login_url'           => $safe_url,
+                    'magic_link'          => $safe_url,
+                    'ephemeral_login_url' => $safe_url,
+                    'url'                 => $safe_url,
+                    'message'             => 'تم إنشاء حسابك في المتجر وإعداد رابط التفعيل وتعيين كلمة المرور (صالح لمدة 24 ساعة).',
+                    'expires_in_seconds'  => 86400,
+                    'single_use'          => true,
+                ], 200 );
+            }
+
+            if ( 'exists' === $error && $uid && SA_WhatsApp_Registration::is_pending( $uid ) ) {
+                $url = SA_WhatsApp_Registration::generate_setup_link( $uid );
+                $safe_url = esc_url_raw( $url );
+                return $finish_ok( [
+                    'ok'                  => '' !== $safe_url,
+                    'success'             => '' !== $safe_url,
+                    'action'              => $action,
+                    'status'              => 'activation_required',
+                    'account_created'     => false,
+                    'link_created'        => '' !== $safe_url,
+                    'login_url'           => $safe_url,
+                    'ephemeral_login_url' => $safe_url,
+                    'url'                 => $safe_url,
+                    'message'             => 'تم تجهيز رابط تفعيل حسابك وتعيين كلمة المرور (صالح لمدة 24 ساعة).',
+                    'expires_in_seconds'  => 86400,
+                    'single_use'          => true,
+                ], 200 );
+            }
+
+            if ( 'exists' === $error ) {
+                return $finish_ok( [
+                    'ok'              => true,
+                    'success'         => true,
+                    'action'          => $action,
+                    'status'          => 'account_exists',
+                    'account_created' => false,
+                    'link_created'    => false,
+                    'message'         => 'هذا الرقم مسجل مسبقاً في المتجر. يمكنك طلب رابط دخول سريع لحسابك.',
+                ], 200 );
+            }
+
+            return $finish_ok( [
+                'ok'              => false,
+                'success'         => false,
                 'action'          => $action,
-                'status'          => 'account_exists',
+                'status'          => 'registration_failed',
                 'account_created' => false,
                 'link_created'    => false,
-                'message'         => 'هذا الرقم مسجل مسبقاً في المتجر. يمكنك طلب رابط دخول سريع لحسابك.',
-            ] );
+                'error_code'      => sanitize_key( (string) $error ),
+                'message'         => is_string( $error ) && '' !== $error ? sanitize_text_field( $error ) : 'تعذر إنشاء الحساب حالياً.',
+            ], 200 );
+        } catch ( Throwable $e ) {
+            if ( ! $lock_closed && $lock_id > 0 && '' !== $owner_token && class_exists( 'SA_WhatsApp_Inbox' ) ) {
+                SA_WhatsApp_Inbox::fail_action( $lock_id, $owner_token, 'RETRYABLE', $e->getMessage(), null, 503 );
+            }
+            return new WP_Error( 'sa_account_action_error', 'حدث خطأ مؤقت أثناء تنفيذ طلب الحساب.', [ 'status' => 503 ] );
         }
+    }
 
-        return rest_ensure_response( [
-            'ok'              => false,
-            'success'         => false,
-            'action'          => $action,
-            'status'          => 'registration_failed',
-            'account_created' => false,
-            'link_created'    => false,
-            'error_code'      => sanitize_key( (string) $error ),
-            'message'         => is_string( $error ) && '' !== $error ? sanitize_text_field( $error ) : 'تعذر إنشاء الحساب حالياً.',
-        ] );
+    private static function resolve_action_idempotency_key( $request ) {
+        $candidates = [
+            method_exists( $request, 'get_header' ) ? (string) $request->get_header( 'Idempotency-Key' ) : '',
+            method_exists( $request, 'get_header' ) ? (string) $request->get_header( 'X-Message-ID' ) : '',
+            method_exists( $request, 'get_header' ) ? (string) $request->get_header( 'X-SA-Message-ID' ) : '',
+            (string) $request->get_param( 'event_id' ),
+            (string) $request->get_param( 'message_id' ),
+        ];
+        foreach ( $candidates as $raw ) {
+            $clean = class_exists( 'SA_WhatsApp_Inbox' ) ? SA_WhatsApp_Inbox::normalize_message_id( $raw ) : trim( $raw );
+            if ( '' !== $clean ) {
+                return $clean;
+            }
+        }
+        return '';
     }
 
     // =========================================================================

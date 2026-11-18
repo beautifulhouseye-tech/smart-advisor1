@@ -152,6 +152,10 @@ class SmartAdvisorClient internal constructor(
         if (url.isBlank()) {
             return unconfiguredFailure()
         }
+        val effectiveKey = idempotencyKey?.trim()?.takeIf { it.isNotEmpty() }
+            ?: msg.notificationId.trim().takeIf {
+                it.isNotEmpty() && it != "smart-advisor-test" && !it.startsWith("queue-retry-")
+            }
         return transport.execute(
             url = url,
             method = "POST",
@@ -160,7 +164,7 @@ class SmartAdvisorClient internal constructor(
             contentType = "JSON",
             maxAttempts = effectiveAttempts(),
             timeoutSeconds = effectiveTimeoutSeconds(),
-            idempotencyKey = idempotencyKey
+            idempotencyKey = effectiveKey
         )
     }
 
@@ -393,7 +397,8 @@ class SmartAdvisorClient internal constructor(
         customerKey: String,
         phone: String = "",
         email: String = "",
-        name: String = ""
+        name: String = "",
+        idempotencyKey: String? = null
     ): SaAccountActionResponse {
         val base = assistantBaseUrl()
         if (base.isBlank()) {
@@ -428,7 +433,8 @@ class SmartAdvisorClient internal constructor(
                 body = payload,
                 contentType = "JSON",
                 maxAttempts = 1,
-                timeoutSeconds = effectiveTimeoutSeconds()
+                timeoutSeconds = effectiveTimeoutSeconds(),
+                idempotencyKey = idempotencyKey?.trim()?.takeIf { it.isNotEmpty() }
             )
         ) {
             is HttpTransport.Result.Success -> parseAccountActionSuccess(result.body, result.code)

@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Smart Advisor – Modular Commerce Assistant
  * Description: Modular WooCommerce assistant with AutoMate AI cooperation, multi-domain durable customer memory, product knowledge, project planning, and wishlist.
- * Version: 6.5.2
+ * Version: 6.5.3
  * Author: Smart Advisor
  * Text Domain: smart-advisor
  */
@@ -15,7 +15,7 @@ if ( version_compare( PHP_VERSION, '7.4', '<' ) ) {
     return;
 }
 
-if ( ! defined( 'MBA_VERSION' ) ) define( 'MBA_VERSION', '6.5.2' );
+if ( ! defined( 'MBA_VERSION' ) ) define( 'MBA_VERSION', '6.5.3' );
 if ( ! defined( 'MBA_SANDBOX_PATH' ) ) define( 'MBA_SANDBOX_PATH', plugin_dir_path( __FILE__ ) );
 if ( ! defined( 'MBA_SANDBOX_URL' ) ) define( 'MBA_SANDBOX_URL', plugin_dir_url( __FILE__ ) );
 
@@ -29,6 +29,7 @@ $mba_files = [
     'services/class-conversation-analyzer.php',
     'services/class-customer-service-composer.php',
     'services/class-advisor-skills.php',
+    'services/class-whatsapp-inbox.php',
     'services/class-whatsapp-reply.php',
     'services/class-automate-integration.php',
     'services/class-whatsapp-magic-link.php',
@@ -95,3 +96,9 @@ add_action( 'plugins_loaded', function() {
     if ( class_exists( 'Core_Chat_Controller' ) ) Core_Chat_Controller::init();
     if ( class_exists( 'SA_Frontend' ) ) SA_Frontend::init();
 }, 10 );
+
+add_action( 'sa_refresh_customer_prefs', function() {
+    if ( class_exists( 'SA_WhatsApp_Inbox' ) ) {
+        SA_WhatsApp_Inbox::purge_old_records();
+    }
+}, 20 );

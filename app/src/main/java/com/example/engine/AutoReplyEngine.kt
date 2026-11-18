@@ -184,7 +184,8 @@ class AutoReplyEngine @Inject constructor(
                                     isGroup = incoming.isGroup,
                                     messageText = incoming.messageText,
                                     isSandbox = false,
-                                    conversationKeyOverride = conversationKey
+                                    conversationKeyOverride = conversationKey,
+                                    messageId = incoming.msgKey
                                 )
                             )
                             replyToSend = collab.replyText

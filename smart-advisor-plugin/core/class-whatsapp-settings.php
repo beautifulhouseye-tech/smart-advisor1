@@ -19,6 +19,8 @@ class SA_WhatsApp_Settings {
             'memory_minutes' => 15,
             'reply_mode'     => 'single_link',
             'whatsapp_number'       => '',
+            'strict_sender_phone'   => 0,
+            'inbox_retention_days'  => 14,
             'link_request_message'  => 'لربط حسابك بالواتساب، أرسل رقم جوالك المسجل في المتجر (مثال: 777123456).
 
 🔒 يُستخدم فقط لإنشاء رابط دخول مؤقت لمدة 10 دقائق.',
@@ -75,6 +77,8 @@ class SA_WhatsApp_Settings {
         $out['bot_name'] = sanitize_text_field( $input['bot_name'] ?? $out['bot_name'] );
         $out['memory_minutes'] = max( 0, min( 1440, absint( $input['memory_minutes'] ?? 15 ) ) );
         $out['whatsapp_number'] = preg_replace( '/[^0-9]/', '', sanitize_text_field( $input['whatsapp_number'] ?? '' ) );
+        $out['strict_sender_phone'] = isset( $input['strict_sender_phone'] ) ? 1 : 0;
+        $out['inbox_retention_days'] = max( 1, min( 90, absint( $input['inbox_retention_days'] ?? 14 ) ) );
         $out['link_request_message'] = sanitize_textarea_field( $input['link_request_message'] ?? '' );
         if ( $out['link_request_message'] === '' ) {
             $out['link_request_message'] = self::defaults()['link_request_message'];
@@ -127,7 +131,7 @@ class SA_WhatsApp_Settings {
                 </div>
             <?php endif; ?>
 
-            <div class="notice notice-info inline"><p><strong>نقطة الربط:</strong> هذا المسار يستقبل طلبات الرد من وسيط واتساب خارجي، ولا ينشئ اتصالاً تلقائياً بحساب WhatsApp Business.</p><p>عنوان API: <code><?php echo esc_html( rest_url( 'smart-advisor/v1/whatsapp/reply' ) ); ?></code></p><p>أرسل المفتاح في ترويسة <code>X-SA-API-Key</code>، والبيانات بصيغة JSON: <code>{"sender":"رقم المرسل","message":"نص الرسالة"}</code>.</p></div>
+            <div class="notice notice-info inline"><p><strong>نقطة الربط:</strong> هذا المسار يستقبل طلبات الرد من وسيط واتساب خارجي، ولا ينشئ اتصالاً تلقائياً بحساب WhatsApp Business.</p><p>عنوان API: <code><?php echo esc_html( rest_url( 'smart-advisor/v1/whatsapp/reply' ) ); ?></code></p><p>أرسل المفتاح في ترويسة <code>X-SA-API-Key</code>، ومُعرّف الرسالة لمنع التكرار عبر <code>message_id</code> أو ترويسة <code>X-Message-ID</code> / <code>Idempotency-Key</code>، والبيانات بصيغة JSON: <code>{"provider":"automate_ai","message_id":"msg_123","sender":"رقم المرسل","phone":"967777123456","message":"نص الرسالة"}</code>.</p></div>
             <form method="post" action="options.php">
                 <?php settings_fields( 'sa_whatsapp_group' ); ?>
                 
@@ -145,6 +149,13 @@ class SA_WhatsApp_Settings {
                             <option value="single_link" <?php selected($c['reply_mode'], 'single_link'); ?>>رابط واحد فقط (الأفضل للصورة)</option>
                             <option value="multi_link" <?php selected($c['reply_mode'], 'multi_link'); ?>>روابط متعددة</option>
                         </select>
+                    </td></tr>
+                    <tr><th>التحقق الصارم من ملكية الرقم</th><td>
+                        <label><input type="checkbox" name="<?php echo self::OPTION; ?>[strict_sender_phone]" value="1" <?php checked($c['strict_sender_phone'] ?? 0, 1); ?>> منع طلبات التسجيل أو رابط الدخول إذا لم ترسل البوابة رقم المرسل الموثق</label>
+                        <p class="description">عند عدم التفعيل، يُسمح بوسيط الإشعارات النصي مع التحقق الإلزامي عند وجود رقم، وحظر المجموعات والحسابات الإدارية دائماً.</p>
+                    </td></tr>
+                    <tr><th>مدة الاحتفاظ بسجل منع التكرار (أيام)</th><td>
+                        <input type="number" min="1" max="90" name="<?php echo self::OPTION; ?>[inbox_retention_days]" value="<?php echo esc_attr($c['inbox_retention_days'] ?? 14); ?>" style="width:90px"> يوم
                     </td></tr>
                 </table>
 

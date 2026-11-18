@@ -57,7 +57,14 @@ class SA_Kitchen_Cart {
         ];
     }
 
-    public static function add_candidates( $candidates, $cart ) {
+    public static function add_candidates( $candidates, $cart, $action_idempotency_key = '' ) {
+        if ( '' !== $action_idempotency_key && function_exists( 'WC' ) && WC() && WC()->session && method_exists( WC()->session, 'get' ) ) {
+            $cache_key = 'sa_cart_add_res_' . hash( 'sha256', (string) $action_idempotency_key );
+            $cached = WC()->session->get( $cache_key );
+            if ( is_array( $cached ) && isset( $cached['success'] ) ) {
+                return $cached;
+            }
+        }
         $result = [
             'added'   => [],
             'failed'  => [],
@@ -127,6 +134,9 @@ class SA_Kitchen_Cart {
             $result['totals'] = $cart->get_cart_contents_total();
         }
         $result['success'] = ! empty( $result['added'] );
+        if ( '' !== $action_idempotency_key && ! empty( $result['added'] ) && function_exists( 'WC' ) && WC() && WC()->session && method_exists( WC()->session, 'set' ) ) {
+            WC()->session->set( 'sa_cart_add_res_' . hash( 'sha256', (string) $action_idempotency_key ), $result );
+        }
         return $result;
     }
 

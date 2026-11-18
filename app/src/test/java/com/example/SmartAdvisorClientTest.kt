@@ -26,6 +26,7 @@ class SmartAdvisorClientTest {
         var lastMethod: String? = null
         var lastHeaders: Map<String, String> = emptyMap()
         var lastBody: String? = null
+        var lastIdempotencyKey: String? = null
 
         override suspend fun execute(
             url: String,
@@ -41,6 +42,7 @@ class SmartAdvisorClientTest {
             lastMethod = method
             lastHeaders = headers
             lastBody = body
+            lastIdempotencyKey = idempotencyKey
             return Result.Success(
                 body = """{"reply":"أهلاً بك في المتجر"}""",
                 code = 200,
@@ -144,9 +146,66 @@ class SmartAdvisorClientTest {
             transport.lastUrl
         )
         assertEquals("secret-key-abc", transport.lastHeaders["X-SA-API-Key"])
+        assertEquals(null, transport.lastIdempotencyKey)
 
         val sentJson = Json.parseToJsonElement(transport.lastBody!!).jsonObject
         assertEquals("AutoMate-Test", sentJson["sender"]?.jsonPrimitive?.content)
         assertEquals("مرحبا", sentJson["message"]?.jsonPrimitive?.content)
+    }
+
+    @Test
+    fun `send forwards notificationId fallback and explicit idempotencyKey while skipping queue sentinels`() = runTest {
+        val vault = createVault()
+        val transport = RecordingTransport()
+        val client = SmartAdvisorClient(
+            transport = transport,
+            vault = vault,
+            baseUrlProvider = { "https://www.777736225.com" },
+            apiKeyRefProvider = { "" }
+        )
+
+        val realMsg = IncomingMessage(
+            app = "com.whatsapp",
+            sender = "Ahmed",
+            senderName = "Ahmed",
+            message = "نعم",
+            phone = "967777111222",
+            groupName = "",
+            isGroup = false,
+            notificationId = "wamid-real-123"
+        )
+        client.send(realMsg)
+        assertEquals("wamid-real-123", transport.lastIdempotencyKey)
+
+        client.send(realMsg, idempotencyKey = "explicit-key-456")
+        assertEquals("explicit-key-456", transport.lastIdempotencyKey)
+
+        val queueSentinelMsg = realMsg.copy(notificationId = "queue-retry-999")
+        client.send(queueSentinelMsg)
+        assertEquals(null, transport.lastIdempotencyKey)
+    }
+
+    @Test
+    fun `performAccountAction forwards idempotencyKey to transport`() = runTest {
+        val vault = createVault()
+        val transport = RecordingTransport()
+        val client = SmartAdvisorClient(
+            transport = transport,
+            vault = vault,
+            baseUrlProvider = { "https://www.777736225.com" },
+            apiKeyRefProvider = { "" }
+        )
+
+        client.performAccountAction(
+            action = "magic_login",
+            customerKey = "phone:967777111222",
+            phone = "967777111222",
+            idempotencyKey = "msg-account-789"
+        )
+        assertEquals(
+            "https://www.777736225.com/wp-json/smart-advisor/v1/whatsapp/assistant/account-action",
+            transport.lastUrl
+        )
+        assertEquals("msg-account-789", transport.lastIdempotencyKey)
     }
 }
