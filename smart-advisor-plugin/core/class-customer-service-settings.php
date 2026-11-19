@@ -85,6 +85,9 @@ class SA_Customer_Service_Settings {
         if ( class_exists( 'SA_Customer_Service_Composer' ) && method_exists( 'SA_Customer_Service_Composer', 'reset_cache' ) ) {
             SA_Customer_Service_Composer::reset_cache();
         }
+        if ( class_exists( 'SA_Settings' ) ) {
+            $clean = SA_Settings::ensure_db_storable( $clean );
+        }
         update_option( self::OPTION, $clean, false );
         if ( class_exists( 'SA_Settings' ) ) {
             SA_Settings::clear_option_cache( self::OPTION );

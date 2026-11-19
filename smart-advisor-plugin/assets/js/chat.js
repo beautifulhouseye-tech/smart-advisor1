@@ -101,8 +101,10 @@
                 setPos(p.x, p.y); return;
             }
         } catch(e) {}
-        var defaultX = cfg.position === 'bottom-left' ? 24 : Math.max(4, window.innerWidth - 84);
-        setPos(defaultX, Math.max(4, window.innerHeight - 84));
+        var bw = toggle.offsetWidth || 84;
+        var bh = toggle.offsetHeight || 48;
+        var defaultX = cfg.position === 'bottom-left' ? 24 : Math.max(4, window.innerWidth - bw - 24);
+        setPos(defaultX, Math.max(4, window.innerHeight - bh - 24));
     }
 
     function openPanel() {

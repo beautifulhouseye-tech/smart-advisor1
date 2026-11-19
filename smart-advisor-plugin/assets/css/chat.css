@@ -1,20 +1,24 @@
 #sa-toggle {
     position: fixed;
     bottom: 24px;
-    width: 60px;
-    height: 60px;
-    border-radius: 50%;
+    min-width: 58px;
+    width: auto;
+    height: 48px;
+    border-radius: 999px;
     background: var(--sa-color, #e91e63);
     color: #fff;
     border: 0;
     cursor: grab;
-    font-size: 27px;
+    font-size: 15px;
+    font-weight: 700;
+    line-height: 1;
+    white-space: nowrap;
     display: flex;
     align-items: center;
     justify-content: center;
     box-shadow: 0 4px 15px rgba(0,0,0,.25);
     z-index: 9999999;
-    padding: 0;
+    padding: 0 18px;
     touch-action: none;
     user-select: none;
 }

@@ -384,7 +384,8 @@ class SA_Frontend {
         if ( ! in_array( $position, array( 'bottom-left', 'bottom-right' ), true ) ) {
             $position = 'bottom-right';
         }
-        $symbol = SA_Settings::get( 'icon_symbol', '💬' );
+        $symbol = SA_Settings::get( 'icon_symbol', 'دردشة' );
+        $symbol = class_exists( 'SA_Settings' ) ? SA_Settings::sanitize_icon_symbol( $symbol ) : ( trim( (string) $symbol ) ?: 'دردشة' );
         $pos_class = 'bottom-left' === $position ? 'sa-pos-left' : 'sa-pos-right';
         ?>
 <button id="sa-toggle" class="<?php echo esc_attr( $pos_class ); ?>" type="button" aria-label="<?php echo esc_attr( 'فتح ' . ( class_exists( 'SA_Customer_Service_Settings' ) ? SA_Customer_Service_Settings::get_config()['assistant_name'] : 'المستشار الذكي' ) ); ?>" aria-controls="sa-panel" aria-expanded="false">

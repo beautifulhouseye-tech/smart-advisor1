@@ -148,6 +148,7 @@ class SA_WhatsApp_Settings {
         }
 
         if ( class_exists( 'SA_Settings' ) ) {
+            $out = SA_Settings::ensure_db_storable( $out );
             SA_Settings::record_pending_write( self::OPTION, $out );
         }
 

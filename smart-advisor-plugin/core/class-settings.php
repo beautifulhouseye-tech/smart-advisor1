@@ -34,7 +34,7 @@ class SA_Settings {
             'ollama_url'       => $legacy['ollama_url'] ?? 'http://172.18.0.8:11434/v1/chat/completions',
             'ollama_model'     => $legacy['ollama_model'] ?? 'qwen2.5:1.5b',
             'icon_color'       => $legacy['icon_bg_color'] ?? '#e91e63',
-            'icon_symbol'      => $legacy['icon_symbol'] ?? '💬',
+            'icon_symbol'      => self::sanitize_icon_symbol( $legacy['icon_symbol'] ?? 'دردشة' ),
             'position'         => 'left' === $horizontal ? 'bottom-left' : 'bottom-right',
             'display_mode'     => $legacy['display_mode'] ?? 'all',
             'display_page_ids' => $legacy['display_page_ids'] ?? '',
@@ -52,6 +52,50 @@ class SA_Settings {
         register_setting( 'sa_group', self::OPTION, [ 'sanitize_callback' => [ __CLASS__, 'sanitize' ] ] );
     }
 
+    public static function sanitize_icon_symbol( $raw_symbol ) {
+        $symbol = sanitize_text_field( (string) $raw_symbol );
+        // Remove 4-byte UTF-8 emojis and variation selectors that break non-utf8mb4 wp_options or render inconsistently.
+        $clean  = @preg_replace( '/[\x{10000}-\x{10FFFF}\x{FE0E}\x{FE0F}\x{200D}]+/u', '', $symbol );
+        if ( null === $clean ) {
+            $clean = preg_replace( '/[\xF0-\xF4][\x80-\xBF]{3}/', '', $symbol );
+        }
+        $clean = trim( (string) $clean );
+        if ( '' === $clean ) {
+            return 'دردشة';
+        }
+        return function_exists( 'mb_substr' ) ? mb_substr( $clean, 0, 12, 'UTF-8' ) : substr( $clean, 0, 24 );
+    }
+
+    public static function db_supports_utf8mb4() {
+        global $wpdb;
+        if ( isset( $wpdb ) && is_object( $wpdb ) && ! empty( $wpdb->options ) && method_exists( $wpdb, 'get_col_charset' ) ) {
+            $charset = $wpdb->get_col_charset( $wpdb->options, 'option_value' );
+            if ( is_string( $charset ) && '' !== $charset ) {
+                return 'utf8mb4' === strtolower( $charset );
+            }
+        }
+        return true;
+    }
+
+    public static function ensure_db_storable( $value ) {
+        if ( self::db_supports_utf8mb4() ) {
+            return $value;
+        }
+        if ( is_string( $value ) ) {
+            $clean = @preg_replace( '/[\x{10000}-\x{10FFFF}\x{FE0E}\x{FE0F}\x{200D}]+/u', '', $value );
+            if ( null === $clean ) {
+                $clean = preg_replace( '/[\xF0-\xF4][\x80-\xBF]{3}/', '', $value );
+            }
+            return trim( (string) preg_replace( '/[ \t]{2,}/', ' ', (string) $clean ) );
+        }
+        if ( is_array( $value ) ) {
+            foreach ( $value as $k => $v ) {
+                $value[ $k ] = self::ensure_db_storable( $v );
+            }
+        }
+        return $value;
+    }
+
     public static function sanitize( $input ) {
         if ( ! is_array( $input ) ) return get_option( self::OPTION, [] );
         $old = get_option( self::OPTION, [] );
@@ -66,7 +110,7 @@ class SA_Settings {
         $ids = array_filter( array_map( 'absint', preg_split( '/[\s,]+/', $raw_ids ) ) );
         $mode = sanitize_key( $input['display_mode'] ?? ( $old['display_mode'] ?? 'all' ) );
         $position = sanitize_key( $input['position'] ?? ( $old['position'] ?? 'bottom-right' ) );
-        $symbol = sanitize_text_field( $input['icon_symbol'] ?? ( $old['icon_symbol'] ?? '💬' ) );
+        $symbol = self::sanitize_icon_symbol( $input['icon_symbol'] ?? ( $old['icon_symbol'] ?? 'دردشة' ) );
 
         $result = [
             'provider'         => in_array( sanitize_key( $input['provider'] ?? ( $old['provider'] ?? 'gateway' ) ), [ 'gateway', 'gemini', 'ollama' ], true ) ? sanitize_key( $input['provider'] ?? ( $old['provider'] ?? 'gateway' ) ) : 'gateway',
@@ -77,7 +121,7 @@ class SA_Settings {
             'ollama_url'       => $ollama_url,
             'ollama_model'     => trim( sanitize_text_field( $input['ollama_model'] ?? ( $old['ollama_model'] ?? 'qwen2.5:1.5b' ) ) ),
             'icon_color'       => sanitize_hex_color( $input['icon_color'] ?? ( $old['icon_color'] ?? '#e91e63' ) ) ?: '#e91e63',
-            'icon_symbol'      => ( function_exists( 'mb_substr' ) ? mb_substr( trim( $symbol ), 0, 4 ) : substr( trim( $symbol ), 0, 16 ) ) ?: '💬',
+            'icon_symbol'      => $symbol,
             'position'         => in_array( $position, [ 'bottom-right', 'bottom-left' ], true ) ? $position : 'bottom-right',
             'display_mode'     => in_array( $mode, [ 'all', 'home', 'shop', 'product', 'pages', 'except_pages' ], true ) ? $mode : 'all',
             'display_page_ids' => implode( ',', array_unique( $ids ) ),
@@ -85,6 +129,7 @@ class SA_Settings {
             'display_to_guests' => isset( $input['display_to_guests'] ) ? ( '1' === (string) $input['display_to_guests'] ) : ( array_key_exists( 'display_to_guests', $old ) ? (bool) $old['display_to_guests'] : true ),
             'display_to_logged_in' => isset( $input['display_to_logged_in'] ) ? ( '1' === (string) $input['display_to_logged_in'] ) : ( array_key_exists( 'display_to_logged_in', $old ) ? (bool) $old['display_to_logged_in'] : true ),
         ];
+        $result = self::ensure_db_storable( $result );
         self::record_pending_write( self::OPTION, $result );
         return $result;
     }
@@ -162,20 +207,23 @@ class SA_Settings {
 
     public static function verify_persisted( $option, $expected ) {
         global $wpdb;
-        if ( isset( $wpdb ) && is_object( $wpdb ) && ! empty( $wpdb->last_error ) ) {
-            return false;
-        }
-        $actual = self::read_option_direct( $option, '__sa_missing__' );
+        $pre_error = ( isset( $wpdb ) && is_object( $wpdb ) && ! empty( $wpdb->last_error ) ) ? (string) $wpdb->last_error : '';
+        $actual    = self::read_option_direct( $option, '__sa_missing__' );
         if ( '__sa_missing__' === $actual ) {
             return false;
         }
-        return self::canonicalize_value( $actual ) === self::canonicalize_value( $expected );
+        if ( self::canonicalize_value( $actual ) === self::canonicalize_value( $expected ) ) {
+            return true;
+        }
+        return false;
     }
 
     public static function verify_settings_errors_transient( $errors ) {
         if ( empty( self::$pending_writes ) || ! is_array( $errors ) ) {
             return $errors;
         }
+        global $wpdb;
+        $db_err         = ( isset( $wpdb ) && is_object( $wpdb ) && ! empty( $wpdb->last_error ) ) ? (string) $wpdb->last_error : '';
         $failed_options = [];
         foreach ( self::$pending_writes as $option => $expected ) {
             self::clear_option_cache( $option );
@@ -192,10 +240,11 @@ class SA_Settings {
                 }
                 $filtered[] = $err;
             }
+            $detail = '' !== $db_err ? ' [' . esc_html( $db_err ) . ']' : '';
             $filtered[] = [
                 'setting' => $failed_options[0],
                 'code'    => 'sa_persistence_failed',
-                'message' => 'تعذر التحقق من حفظ الإعدادات فعلياً في قاعدة البيانات (' . esc_html( implode( ', ', $failed_options ) ) . '). قد يوجد خطأ في قاعدة البيانات أو طبقة التخزين المؤقت.',
+                'message' => 'تعذر التحقق من حفظ الإعدادات فعلياً في قاعدة البيانات (' . esc_html( implode( ', ', $failed_options ) ) . ').' . $detail . ' قد يوجد خطأ في قاعدة البيانات أو طبقة التخزين المؤقت.',
                 'type'    => 'error',
             ];
             return $filtered;
@@ -486,8 +535,18 @@ class SA_Settings {
 
                 <h2 class="title">🎨 التصميم</h2>
                 <table class="form-table">
-                    <tr><th><label for="sa_color">لون الأيقونة</label></th><td><input id="sa_color" type="color" name="<?php echo esc_attr( self::OPTION ); ?>[icon_color]" value="<?php echo esc_attr( $c['icon_color'] ?? '#e91e63' ); ?>"></td></tr>
-                    <tr><th><label for="sa_symbol">رمز الأيقونة</label></th><td><input id="sa_symbol" type="text" name="<?php echo esc_attr( self::OPTION ); ?>[icon_symbol]" value="<?php echo esc_attr( $c['icon_symbol'] ?? '💬' ); ?>" maxlength="4" class="small-text"></td></tr>
+                    <tr><th><label for="sa_color">لون الزر</label></th><td><input id="sa_color" type="color" name="<?php echo esc_attr( self::OPTION ); ?>[icon_color]" value="<?php echo esc_attr( $c['icon_color'] ?? '#e91e63' ); ?>"></td></tr>
+                    <tr>
+                        <th><label for="sa_symbol">نص زر المحادثة</label></th>
+                        <td>
+                            <input id="sa_symbol" type="text" name="<?php echo esc_attr( self::OPTION ); ?>[icon_symbol]" value="<?php echo esc_attr( self::sanitize_icon_symbol( $c['icon_symbol'] ?? 'دردشة' ) ); ?>" maxlength="12" style="width:160px" placeholder="دردشة">
+                            <p class="description">اكتب نصاً قصيراً يظهر على زر المحادثة (بدلاً من الإيموجي لضمان التوافق مع قواعد البيانات). مقترحات سريعة:
+                                <?php foreach ( [ 'دردشة', 'اسألنا', 'مساعد', 'AI', 'تواصل' ] as $preset ) : ?>
+                                    <button type="button" class="button button-small sa-symbol-preset" data-val="<?php echo esc_attr( $preset ); ?>"><?php echo esc_html( $preset ); ?></button>
+                                <?php endforeach; ?>
+                            </p>
+                        </td>
+                    </tr>
                     <tr><th><label for="sa_pos">الموضع الافتراضي</label></th><td><select id="sa_pos" name="<?php echo esc_attr( self::OPTION ); ?>[position]"><option value="bottom-right" <?php selected( $c['position'] ?? 'bottom-right', 'bottom-right' ); ?>>أسفل اليمين</option><option value="bottom-left" <?php selected( $c['position'] ?? '', 'bottom-left' ); ?>>أسفل اليسار</option></select></td></tr>
                 </table>
 
@@ -550,6 +609,15 @@ class SA_Settings {
                         result.style.color = '#d63638';
                     } finally {
                         btn.disabled = false;
+                    }
+                });
+            });
+            var symInput = document.getElementById('sa_symbol');
+            document.querySelectorAll('.sa-symbol-preset').forEach(function(b){
+                b.addEventListener('click', function(){
+                    if (symInput) {
+                        symInput.value = b.getAttribute('data-val') || 'دردشة';
+                        symInput.focus();
                     }
                 });
             });

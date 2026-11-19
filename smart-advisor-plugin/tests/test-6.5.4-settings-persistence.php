@@ -270,7 +270,7 @@ update_option( SA_Settings::OPTION, [
     'ollama_url'           => 'localhost:11434/v1/chat/completions',
     'ollama_model'         => 'qwen2.5:1.5b',
     'icon_color'           => '#123456',
-    'icon_symbol'          => '🤖',
+    'icon_symbol'          => 'اسألنا',
     'position'             => 'bottom-left',
     'display_mode'         => 'shop',
     'display_page_ids'     => '10, 20, 10',
@@ -279,15 +279,17 @@ update_option( SA_Settings::OPTION, [
 ] );
 $saved_core = get_option( SA_Settings::OPTION );
 sa654_assert(
-    '1. SA_Settings preserves secrets, gateway model with /: , normalizes URLs, and keeps display_to_guests=false across add_option double sanitize',
+    '1. SA_Settings preserves secrets, gateway model with /: , text icon_symbol, normalizes URLs, and keeps display_to_guests=false across add_option double sanitize',
     'http://172.18.0.8:3000/v1/chat/completions' === $saved_core['gateway_url']
     && 'http://localhost:11434/v1/chat/completions' === $saved_core['ollama_url']
     && 'qwen/qwen2.5-7b:free' === $saved_core['model']
     && 'gemini_secret_123' === $saved_core['api_key']
     && 'gw_secret_456' === $saved_core['gateway_key']
+    && 'اسألنا' === $saved_core['icon_symbol']
     && false === $saved_core['display_to_guests']
     && true === $saved_core['display_to_logged_in']
     && '10,20' === $saved_core['display_page_ids']
+    && 'دردشة' === SA_Settings::sanitize_icon_symbol( '💬' )
 );
 
 // Re-save leaving password inputs blank -> secrets retained; check clear_api_key -> clears api_key only

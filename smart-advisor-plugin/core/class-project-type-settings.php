@@ -134,6 +134,7 @@ class SA_Project_Type_Settings {
         }
         $result = $out ?: self::all();
         if ( class_exists( 'SA_Settings' ) ) {
+            $result = SA_Settings::ensure_db_storable( $result );
             SA_Settings::record_pending_write( self::OPTION, $result );
         }
         return $result;
