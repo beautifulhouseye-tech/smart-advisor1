@@ -138,11 +138,11 @@ fun AISettingsScreen(
                         ) {
                             Column(modifier = Modifier.weight(1f)) {
                                 Text(
-                                    text = "تفعيل التعاون الذكي والرد بالـ AI",
+                                    text = "تفعيل المنسّق الذكي الوحيد (AI Orchestrator)",
                                     style = MaterialTheme.typography.titleMedium
                                 )
                                 Text(
-                                    text = "يدير AutoMate AI المحادثة الحية عبر New API مع التحويل التلقائي إلى Ollama/Qwen عند التعذر واستشارة Smart Advisor لبيانات المتجر.",
+                                    text = "AI هو عقل المحادثة الوحيد: يدير الحوار عبر New API مع احتياطي Ollama/Qwen، ويستدعي Smart Advisor (بيانات المتجر) وWebhook (خدمات خارجية) كأدوات عند الحاجة.",
                                     style = MaterialTheme.typography.bodySmall,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant
                                 )
@@ -506,7 +506,7 @@ fun AISettingsScreen(
                                     tint = MaterialTheme.colorScheme.primary
                                 )
                                 Text(
-                                    text = "الذاكرة المحلية والتعاون مع Smart Advisor 6.5",
+                                    text = "الذاكرة وأدوات المنسّق (Smart Advisor + Webhook)",
                                     style = MaterialTheme.typography.titleMedium
                                 )
                             }

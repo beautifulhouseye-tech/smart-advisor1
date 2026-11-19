@@ -1,8 +1,12 @@
 package com.example.engine
 
+import com.example.data.local.entity.ServerConfigEntity
+import com.example.data.local.entity.WebhookMode
 import com.example.data.preferences.AiSettingsPrefs
 import com.example.data.preferences.AiSettingsState
+import com.example.data.repository.ServerConfigRepository
 import com.example.data.security.SmartAdvisorPrefs
+import com.example.network.WebhookClient
 import com.example.network.ai.AIReplyEngine
 import com.example.network.security.SecretVault
 import com.example.network.security.SensitiveDataRedactor
@@ -20,6 +24,8 @@ class SmartCollaborationCoordinator(
     private val conversationMemoryManager: ConversationMemoryManager,
     private val memoryOutboxCoordinator: MemoryOutboxCoordinator?,
     private val secretVault: SecretVault,
+    private val serverRepo: ServerConfigRepository? = null,
+    private val webhookClient: WebhookClient? = null,
     private val clockMs: () -> Long = { System.currentTimeMillis() }
 ) {
     @Inject
@@ -30,7 +36,9 @@ class SmartCollaborationCoordinator(
         smartAdvisorPrefs: SmartAdvisorPrefs,
         conversationMemoryManager: ConversationMemoryManager,
         memoryOutboxCoordinator: MemoryOutboxCoordinator,
-        secretVault: SecretVault
+        secretVault: SecretVault,
+        serverRepo: ServerConfigRepository,
+        webhookClient: WebhookClient
     ) : this(
         aiSettingsPrefs = aiSettingsPrefs,
         aiReplyEngine = aiReplyEngine,
@@ -39,8 +47,33 @@ class SmartCollaborationCoordinator(
         conversationMemoryManager = conversationMemoryManager,
         memoryOutboxCoordinator = memoryOutboxCoordinator,
         secretVault = secretVault,
+        serverRepo = serverRepo,
+        webhookClient = webhookClient,
         clockMs = { System.currentTimeMillis() }
     )
+
+    internal constructor(
+        aiSettingsPrefs: AiSettingsPrefs,
+        aiReplyEngine: AIReplyEngine,
+        smartAdvisorClient: SmartAdvisorClient,
+        smartAdvisorPrefs: SmartAdvisorPrefs,
+        conversationMemoryManager: ConversationMemoryManager,
+        memoryOutboxCoordinator: MemoryOutboxCoordinator?,
+        secretVault: SecretVault,
+        clockMs: () -> Long
+    ) : this(
+        aiSettingsPrefs = aiSettingsPrefs,
+        aiReplyEngine = aiReplyEngine,
+        smartAdvisorClient = smartAdvisorClient,
+        smartAdvisorPrefs = smartAdvisorPrefs,
+        conversationMemoryManager = conversationMemoryManager,
+        memoryOutboxCoordinator = memoryOutboxCoordinator,
+        secretVault = secretVault,
+        serverRepo = null,
+        webhookClient = null,
+        clockMs = clockMs
+    )
+
     data class CollaborationInput(
         val packageName: String,
         val senderName: String,
@@ -62,7 +95,14 @@ class SmartCollaborationCoordinator(
         val activeEngine: String = "",
         val switchedToQwen: Boolean = false,
         val calledSmartAdvisor: Boolean = false,
+        val calledWebhook: Boolean = false,
         val saIntent: String = "general",
+        val saToolReason: String = "",
+        val webhookToolReason: String = "",
+        val webhookDataSnippet: String = "",
+        val webhookStatusCode: Int? = null,
+        val invokedTools: List<String> = emptyList(),
+        val toolRoundsUsed: Int = 0,
         val verifiedStoreDataUsed: Boolean = false,
         val verifiedDataSnippet: String = "",
         val memoryLoaded: Boolean = false,
@@ -73,6 +113,15 @@ class SmartCollaborationCoordinator(
         val redactedError: String? = null,
         val stageLatenciesMs: Map<String, Long> = emptyMap(),
         val currentTopic: String = ""
+    )
+
+    private data class CollectedToolNote(
+        val toolLabel: String,
+        val trustLabel: String,
+        val query: String,
+        val reason: String,
+        val content: String,
+        val ok: Boolean
     )
 
     suspend fun collaborate(input: CollaborationInput): CollaborationOutcome {
@@ -103,6 +152,13 @@ class SmartCollaborationCoordinator(
         val saAvailable = smartAdvisorPrefs.enabled &&
             aiSettings.saCollaborationEnabled &&
             smartAdvisorClient.assistantBaseUrl().isNotBlank()
+
+        val serverConfig = serverRepo?.get()
+        val webhookToolAvailable = webhookClient != null &&
+            serverConfig != null &&
+            serverConfig.isEnabled &&
+            serverConfig.effectiveWebhookMode() == WebhookMode.AI_TOOL &&
+            serverConfig.url.isNotBlank()
 
         var memoryLoaded = false
         var serverMemoryText = ""
@@ -152,7 +208,9 @@ class SmartCollaborationCoordinator(
             localContextBlock = localContextBlock,
             serverMemoryBlock = serverMemoryText,
             saAvailable = saAvailable,
-            capabilities = capabilities
+            capabilities = capabilities,
+            webhookToolAvailable = webhookToolAvailable,
+            webhookConfig = serverConfig
         )
 
         val pass1Outcome = aiReplyEngine.runCollaborationTurn(
@@ -196,156 +254,464 @@ class SmartCollaborationCoordinator(
             lastErrorRedacted = pass1Outcome.redactedError ?: ""
         )
 
-        var finalDecision = decision1
+        var currentDecision: AIReplyEngine.AiStructuredDecision = decision1
         var activeEngineLabel = pass1Outcome.activeEngineLabel
         var switchedToQwen = pass1Outcome.switchedToFallback
         var calledSmartAdvisor = false
+        var calledWebhook = false
         var verifiedStoreDataUsed = false
         var verifiedDataSnippet = ""
-        var saIntent = SmartAdvisorClient.normalizeKnowledgeIntent(decision1.storeIntent.ifBlank { decision1.intent })
+        var saToolReason = ""
+        var webhookToolReason = ""
+        var webhookDataSnippet = ""
+        var webhookStatusCode: Int? = null
+        var saIntent = SmartAdvisorClient.normalizeKnowledgeIntent(
+            decision1.storeIntent.ifBlank { decision1.intent }
+        )
         var finalRedactedError = pass1Outcome.redactedError
         var deliveryContainsEphemeralLink = false
+        var lastVerifiedKnowledge: SmartAdvisorClient.SaKnowledgeResponse? = null
+        var lastFailedKnowledge: SmartAdvisorClient.SaKnowledgeResponse? = null
 
-        // Account action branch (private chats only)
-        if (decision1.accountAction.isNotBlank()) {
-            if (input.isGroup) {
-                val groupPrivateOnlyReply =
-                    "لحماية خصوصية حسابك، لا يمكن تنفيذ طلبات التسجيل أو روابط الدخول داخل المجموعات. يرجى مراسلتي في محادثة خاصة."
-                return CollaborationOutcome(
-                    replyText = groupPrivateOnlyReply,
-                    conversationKey = conversationKey,
-                    usedNewApi = usedNewApiFlag,
-                    usedPrimaryEngine = pass1Outcome.primaryEngineLabel,
-                    activeEngine = activeEngineLabel,
-                    switchedToQwen = switchedToQwen,
-                    calledSmartAdvisor = false,
-                    saIntent = "account_action_blocked_group",
-                    memoryLoaded = memoryLoaded,
-                    needsHuman = false,
-                    stageLatenciesMs = latencies,
-                    currentTopic = contextEntity.currentTopic
-                )
+        val invokedTools = linkedSetOf<String>()
+        val executedSignatures = mutableSetOf<String>()
+        val collectedToolNotes = mutableListOf<CollectedToolNote>()
+        var roundsUsed = 0
+
+        // Bounded multi-tool orchestration loop
+        while (roundsUsed < MAX_TOOL_ROUNDS) {
+            var newToolExecuted = false
+
+            // 1. Account action branch (DM-only + explicit confirmation + idempotency)
+            if (currentDecision.accountAction.isNotBlank()) {
+                val cleanAction = currentDecision.accountAction.trim().lowercase()
+                val actionSig = "account:$cleanAction"
+                if (actionSig !in executedSignatures) {
+                    if (input.isGroup) {
+                        val groupPrivateOnlyReply =
+                            "لحماية خصوصية حسابك، لا يمكن تنفيذ طلبات التسجيل أو روابط الدخول داخل المجموعات. يرجى مراسلتي في محادثة خاصة."
+                        return CollaborationOutcome(
+                            replyText = groupPrivateOnlyReply,
+                            conversationKey = conversationKey,
+                            usedNewApi = usedNewApiFlag,
+                            usedPrimaryEngine = pass1Outcome.primaryEngineLabel,
+                            activeEngine = activeEngineLabel,
+                            switchedToQwen = switchedToQwen,
+                            calledSmartAdvisor = calledSmartAdvisor,
+                            calledWebhook = calledWebhook,
+                            saIntent = "account_action_blocked_group",
+                            invokedTools = invokedTools.toList(),
+                            toolRoundsUsed = roundsUsed,
+                            memoryLoaded = memoryLoaded,
+                            needsHuman = false,
+                            stageLatenciesMs = latencies,
+                            currentTopic = contextEntity.currentTopic
+                        )
+                    }
+
+                    val confirmed = currentDecision.accountActionConfirmed ||
+                        isExplicitAccountRequest(input.messageText, cleanAction)
+
+                    if (!confirmed) {
+                        executedSignatures += actionSig
+                        currentDecision = currentDecision.copy(
+                            reply = "لتأمين حسابك، هل تؤكد رغبتك في تنفيذ طلب الحساب الآن؟ يرجى الرد بـ «نعم أؤكد»."
+                        )
+                    } else if (saAvailable && capabilities?.accountActionsEnabled == true) {
+                        executedSignatures += actionSig
+                        calledSmartAdvisor = true
+                        invokedTools += TOOL_SMART_ADVISOR
+                        saToolReason = "account_action:$cleanAction"
+                        val actionStart = clockMs()
+                        val actionRes = smartAdvisorClient.performAccountAction(
+                            action = cleanAction,
+                            customerKey = contextEntity.customerKey,
+                            phone = input.phone,
+                            name = input.senderName,
+                            idempotencyKey = if (input.isSandbox) null else input.messageId.ifBlank { null }
+                        )
+                        latencies["sa_account_action"] = (clockMs() - actionStart).coerceAtLeast(0L)
+
+                        if (actionRes.ok) {
+                            verifiedStoreDataUsed = true
+                            deliveryContainsEphemeralLink =
+                                actionRes.linkCreated && actionRes.ephemeralLoginUrl.isNotBlank()
+                            val snippet = SensitiveDataRedactor.scrub(
+                                actionRes.message.ifBlank { actionRes.status },
+                                secretVault
+                            )
+                            verifiedDataSnippet = snippet
+
+                            val hasAdditionalTools = requestsStoreKnowledge(currentDecision) ||
+                                requestsWebhookTool(currentDecision)
+                            if (!hasAdditionalTools) {
+                                val composedReply = composeAccountActionReply(
+                                    actionRes = actionRes,
+                                    settings = aiSettings,
+                                    recentTurns = recentTurns,
+                                    userMessage = input.messageText
+                                )
+                                if (composedReply != null) {
+                                    currentDecision = currentDecision.copy(reply = composedReply)
+                                }
+                                break
+                            } else {
+                                newToolExecuted = true
+                                collectedToolNotes += CollectedToolNote(
+                                    toolLabel = TOOL_SMART_ADVISOR,
+                                    trustLabel = "إجراء حساب مؤكد من المتجر",
+                                    query = cleanAction,
+                                    reason = "account_action",
+                                    content = if (deliveryContainsEphemeralLink) {
+                                        "تم تجهيز رابط الدخول السريع للحساب: ${actionRes.ephemeralLoginUrl}"
+                                    } else {
+                                        snippet
+                                    },
+                                    ok = true
+                                )
+                            }
+                        } else {
+                            finalRedactedError = actionRes.error ?: finalRedactedError
+                            collectedToolNotes += CollectedToolNote(
+                                toolLabel = TOOL_SMART_ADVISOR,
+                                trustLabel = "تعذر إجراء الحساب",
+                                query = cleanAction,
+                                reason = "account_action",
+                                content = actionRes.error ?: "فشل تنفيذ إجراء الحساب",
+                                ok = false
+                            )
+                            newToolExecuted = true
+                        }
+                    }
+                }
             }
 
-            if (saAvailable && capabilities?.accountActionsEnabled == true) {
-                calledSmartAdvisor = true
-                val actionStart = clockMs()
-                val actionRes = smartAdvisorClient.performAccountAction(
-                    action = decision1.accountAction,
-                    customerKey = contextEntity.customerKey,
-                    phone = input.phone,
-                    name = input.senderName,
-                    idempotencyKey = if (input.isSandbox) null else input.messageId.ifBlank { null }
+            // 2. Smart Advisor Knowledge Tool
+            val requestedSaTool = currentDecision.toolRequests.firstOrNull {
+                it.tool == "smart_advisor" || it.tool == "smartadvisor" || it.tool == "sa"
+            }
+            if (currentDecision.needsStoreData || requestedSaTool != null) {
+                val queryText = (requestedSaTool?.query?.takeIf { it.isNotBlank() }
+                    ?: currentDecision.storeQuery.ifBlank { input.messageText }).trim()
+                val resolvedIntent = SmartAdvisorClient.normalizeKnowledgeIntent(
+                    requestedSaTool?.intent?.takeIf { it.isNotBlank() }
+                        ?: currentDecision.storeIntent.ifBlank { currentDecision.intent }
                 )
-                latencies["sa_account_action"] = (clockMs() - actionStart).coerceAtLeast(0L)
+                saIntent = resolvedIntent
+                val saSig = "sa:${queryText.lowercase()}:$resolvedIntent"
 
-                if (actionRes.ok) {
-                    verifiedStoreDataUsed = true
-                    deliveryContainsEphemeralLink = actionRes.linkCreated && actionRes.ephemeralLoginUrl.isNotBlank()
-                    verifiedDataSnippet = SensitiveDataRedactor.scrub(
-                        actionRes.message.ifBlank { actionRes.status },
-                        secretVault
-                    )
-                    val composedReply = composeAccountActionReply(
-                        actionRes = actionRes,
-                        settings = aiSettings,
-                        recentTurns = recentTurns,
-                        userMessage = input.messageText
-                    )
-                    if (composedReply != null) {
-                        finalDecision = finalDecision.copy(reply = composedReply)
+                if (saSig !in executedSignatures) {
+                    executedSignatures += saSig
+                    if (saAvailable && (capabilities?.knowledgeEnabled != false)) {
+                        calledSmartAdvisor = true
+                        invokedTools += TOOL_SMART_ADVISOR
+                        saToolReason = requestedSaTool?.reason?.ifBlank { queryText } ?: queryText
+                        newToolExecuted = true
+
+                        val saStart = clockMs()
+                        val knowledge = smartAdvisorClient.queryKnowledge(
+                            query = queryText,
+                            intent = resolvedIntent,
+                            customerKey = contextEntity.customerKey,
+                            isGroup = input.isGroup
+                        )
+                        latencies["smart_advisor_knowledge"] =
+                            (latencies["smart_advisor_knowledge"] ?: 0L) +
+                                (clockMs() - saStart).coerceAtLeast(0L)
+
+                        if (knowledge.ok && knowledge.hasVerifiedData) {
+                            lastVerifiedKnowledge = knowledge
+                            verifiedStoreDataUsed = true
+                            val snippet = buildVerifiedKnowledgeSnippet(knowledge)
+                            verifiedDataSnippet = listOf(verifiedDataSnippet, snippet)
+                                .filter { it.isNotBlank() }
+                                .joinToString("\n")
+                            collectedToolNotes += CollectedToolNote(
+                                toolLabel = TOOL_SMART_ADVISOR,
+                                trustLabel = "بيانات متجر مؤكدة (WooCommerce)",
+                                query = queryText,
+                                reason = saToolReason,
+                                content = snippet,
+                                ok = true
+                            )
+                        } else {
+                            lastFailedKnowledge = knowledge
+                            verifiedStoreDataUsed = verifiedStoreDataUsed && false
+                            val errMsg = knowledge.error ?: "لا توجد بيانات مؤكدة من المتجر"
+                            if (verifiedDataSnippet.isBlank()) verifiedDataSnippet = errMsg
+                            collectedToolNotes += CollectedToolNote(
+                                toolLabel = TOOL_SMART_ADVISOR,
+                                trustLabel = "فشل/لا توجد بيانات مؤكدة",
+                                query = queryText,
+                                reason = saToolReason,
+                                content = errMsg,
+                                ok = false
+                            )
+                            currentDecision = currentDecision.copy(needsHuman = true)
+                        }
+                    } else {
+                        saToolReason = "Smart Advisor معطّل أو غير مهيأ"
+                        collectedToolNotes += CollectedToolNote(
+                            toolLabel = TOOL_SMART_ADVISOR,
+                            trustLabel = "أداة غير متاحة",
+                            query = queryText,
+                            reason = saToolReason,
+                            content = "بيانات المتجر غير متوفرة حالياً عبر Smart Advisor",
+                            ok = false
+                        )
+                        if (currentDecision.reply.isBlank()) {
+                            currentDecision = currentDecision.copy(needsHuman = true)
+                        }
                     }
-                } else {
-                    finalRedactedError = actionRes.error ?: finalRedactedError
                 }
+            }
+
+            // 3. External Webhook AI Tool
+            val requestedWebhookTool = currentDecision.toolRequests.firstOrNull {
+                it.tool == "webhook" || it.tool == "server" || it.tool == "external_webhook"
+            }
+            if (currentDecision.needsWebhookData || requestedWebhookTool != null) {
+                val queryText = (requestedWebhookTool?.query?.takeIf { it.isNotBlank() }
+                    ?: currentDecision.webhookQuery.ifBlank { input.messageText }).trim()
+                val reasonText = (requestedWebhookTool?.reason?.takeIf { it.isNotBlank() }
+                    ?: currentDecision.webhookReason.ifBlank { queryText }).trim()
+                val whSig = "webhook:${queryText.lowercase()}"
+
+                if (whSig !in executedSignatures) {
+                    executedSignatures += whSig
+                    if (webhookToolAvailable && serverConfig != null && webhookClient != null) {
+                        calledWebhook = true
+                        invokedTools += TOOL_WEBHOOK
+                        webhookToolReason = reasonText
+                        newToolExecuted = true
+
+                        val whStart = clockMs()
+                        val msgForWebhook = IncomingMessage(
+                            app = input.packageName,
+                            sender = input.senderName,
+                            senderName = input.senderName,
+                            message = input.messageText,
+                            phone = input.phone,
+                            groupName = input.groupName.orEmpty(),
+                            isGroup = input.isGroup,
+                            notificationId = input.messageId.ifBlank { "ai-tool-${clockMs()}" },
+                            timestamp = clockMs(),
+                            aiQuery = queryText
+                        )
+                        val whRes = webhookClient.invokeAsAiTool(
+                            config = serverConfig,
+                            msg = msgForWebhook,
+                            aiQuery = queryText,
+                            idempotencyKey = if (input.isSandbox) null else input.messageId.ifBlank { null },
+                            reason = reasonText
+                        )
+                        latencies["webhook_tool"] =
+                            (latencies["webhook_tool"] ?: 0L) +
+                                (clockMs() - whStart).coerceAtLeast(0L)
+
+                        webhookStatusCode = whRes.statusCode
+                        val candidateSnippet = whRes.extractedText.ifBlank { whRes.rawExcerpt }
+                        if (candidateSnippet.isNotBlank()) {
+                            webhookDataSnippet = candidateSnippet
+                        }
+
+                        if (whRes.ok) {
+                            collectedToolNotes += CollectedToolNote(
+                                toolLabel = TOOL_WEBHOOK,
+                                trustLabel = "مصدر خارجي غير متحقق منه (External Webhook)",
+                                query = queryText,
+                                reason = reasonText,
+                                content = candidateSnippet,
+                                ok = true
+                            )
+                        } else {
+                            finalRedactedError = whRes.redactedError ?: finalRedactedError
+                            collectedToolNotes += CollectedToolNote(
+                                toolLabel = TOOL_WEBHOOK,
+                                trustLabel = "تعذر الاستعلام من Webhook الخارجي",
+                                query = queryText,
+                                reason = reasonText,
+                                content = whRes.redactedError ?: "فشل الاتصال بالخادم الخارجي",
+                                ok = false
+                            )
+                        }
+                    } else {
+                        webhookToolReason = "Webhook غير مفعّل في وضع أداة AI"
+                        collectedToolNotes += CollectedToolNote(
+                            toolLabel = TOOL_WEBHOOK,
+                            trustLabel = "أداة غير متاحة",
+                            query = queryText,
+                            reason = webhookToolReason,
+                            content = "خادم Webhook غير مفعّل في وضع أداة AI حالياً",
+                            ok = false
+                        )
+                    }
+                }
+            }
+
+            if (!newToolExecuted) break
+
+            roundsUsed++
+            val allowMoreTools = roundsUsed < MAX_TOOL_ROUNDS
+            val synthesisPrompt = buildToolSynthesisSystemInstruction(
+                aiSettings = aiSettings,
+                senderName = input.rawTitle.ifBlank { input.senderName },
+                localContextBlock = localContextBlock,
+                toolNotes = collectedToolNotes,
+                allowMoreTools = allowMoreTools,
+                saAvailable = saAvailable,
+                webhookToolAvailable = webhookToolAvailable,
+                webhookConfig = serverConfig
+            )
+
+            val synthesisOutcome = aiReplyEngine.runCollaborationTurn(
+                settings = aiSettings,
+                userMessage = input.messageText,
+                systemInstruction = synthesisPrompt,
+                recentTurns = recentTurns
+            )
+            latencies["ai_compose_final"] =
+                (latencies["ai_compose_final"] ?: 0L) +
+                    synthesisOutcome.primaryLatencyMs +
+                    synthesisOutcome.fallbackLatencyMs
+            switchedToQwen = switchedToQwen || synthesisOutcome.switchedToFallback
+            if (synthesisOutcome.activeEngineLabel.isNotBlank()) {
+                activeEngineLabel = synthesisOutcome.activeEngineLabel
+            }
+
+            val nextDecision = synthesisOutcome.decision
+            if (nextDecision != null) {
+                currentDecision = nextDecision.copy(
+                    needsHuman = nextDecision.needsHuman || currentDecision.needsHuman,
+                    memoryUpdate = nextDecision.memoryUpdate ?: currentDecision.memoryUpdate
+                )
+                // If AI synthesized a reply and requested no additional uncalled tools, we are done
+                val hasMoreToolsRequested = allowMoreTools && (
+                    requestsStoreKnowledge(currentDecision) || requestsWebhookTool(currentDecision)
+                    )
+                if (!hasMoreToolsRequested && currentDecision.reply.isNotBlank()) {
+                    break
+                }
+                if (!allowMoreTools && currentDecision.reply.isBlank()) {
+                    // Force safe text without fabricating if model omitted reply on final round
+                    currentDecision = currentDecision.copy(
+                        reply = buildSafeToolFallbackReply(
+                            lastVerifiedKnowledge = lastVerifiedKnowledge,
+                            lastFailedKnowledge = lastFailedKnowledge,
+                            webhookDataSnippet = webhookDataSnippet,
+                            fallbackDraft = ""
+                        )
+                    )
+                    break
+                }
+            } else {
+                // Synthesis call failed -> safe deterministic fallback only (never leak unverified Pass 1 guesses!)
+                if (lastVerifiedKnowledge != null) {
+                    val verifiedFallback = lastVerifiedKnowledge.summary.takeIf { it.isNotBlank() }
+                        ?: lastVerifiedKnowledge.facts.joinToString("\n").takeIf { it.isNotBlank() }
+                    if (!verifiedFallback.isNullOrBlank()) {
+                        currentDecision = currentDecision.copy(reply = verifiedFallback)
+                        break
+                    }
+                }
+                if (lastFailedKnowledge != null) {
+                    currentDecision = currentDecision.copy(
+                        reply = buildNoVerifiedDataReply(lastFailedKnowledge, ""),
+                        needsHuman = true
+                    )
+                    break
+                }
+                if (calledSmartAdvisor && !verifiedStoreDataUsed) {
+                    return CollaborationOutcome(
+                        replyText = null,
+                        conversationKey = conversationKey,
+                        usedNewApi = usedNewApiFlag,
+                        usedPrimaryEngine = pass1Outcome.primaryEngineLabel,
+                        activeEngine = activeEngineLabel,
+                        switchedToQwen = switchedToQwen,
+                        calledSmartAdvisor = calledSmartAdvisor,
+                        calledWebhook = calledWebhook,
+                        saIntent = saIntent,
+                        saToolReason = saToolReason,
+                        webhookToolReason = webhookToolReason,
+                        webhookDataSnippet = SensitiveDataRedactor.scrub(webhookDataSnippet, secretVault),
+                        webhookStatusCode = webhookStatusCode,
+                        invokedTools = invokedTools.toList(),
+                        toolRoundsUsed = roundsUsed,
+                        verifiedStoreDataUsed = false,
+                        memoryLoaded = memoryLoaded,
+                        redactedError = synthesisOutcome.redactedError ?: "تعذر صياغة الرد النهائي",
+                        stageLatenciesMs = latencies,
+                        currentTopic = contextEntity.currentTopic
+                    )
+                }
+                val safeFallback = buildSafeToolFallbackReply(
+                    lastVerifiedKnowledge = lastVerifiedKnowledge,
+                    lastFailedKnowledge = lastFailedKnowledge,
+                    webhookDataSnippet = webhookDataSnippet,
+                    fallbackDraft = ""
+                )
+                if (safeFallback.isBlank()) {
+                    return CollaborationOutcome(
+                        replyText = null,
+                        conversationKey = conversationKey,
+                        usedNewApi = usedNewApiFlag,
+                        usedPrimaryEngine = pass1Outcome.primaryEngineLabel,
+                        activeEngine = activeEngineLabel,
+                        switchedToQwen = switchedToQwen,
+                        calledSmartAdvisor = calledSmartAdvisor,
+                        calledWebhook = calledWebhook,
+                        saIntent = saIntent,
+                        saToolReason = saToolReason,
+                        webhookToolReason = webhookToolReason,
+                        webhookDataSnippet = SensitiveDataRedactor.scrub(webhookDataSnippet, secretVault),
+                        webhookStatusCode = webhookStatusCode,
+                        invokedTools = invokedTools.toList(),
+                        toolRoundsUsed = roundsUsed,
+                        verifiedStoreDataUsed = verifiedStoreDataUsed,
+                        memoryLoaded = memoryLoaded,
+                        redactedError = synthesisOutcome.redactedError ?: finalRedactedError,
+                        stageLatenciesMs = latencies,
+                        currentTopic = contextEntity.currentTopic
+                    )
+                }
+                currentDecision = currentDecision.copy(reply = safeFallback)
+                break
             }
         }
 
-        // Smart Advisor Store Knowledge branch (ONLY when needs_store_data == true)
-        if (decision1.needsStoreData) {
-            if (saAvailable && (capabilities?.knowledgeEnabled != false)) {
-                calledSmartAdvisor = true
-                val queryText = decision1.storeQuery.ifBlank { input.messageText }
-                val saStart = clockMs()
-                val knowledge = smartAdvisorClient.queryKnowledge(
-                    query = queryText,
-                    intent = saIntent,
-                    customerKey = contextEntity.customerKey,
-                    isGroup = input.isGroup
-                )
-                latencies["smart_advisor_knowledge"] = (clockMs() - saStart).coerceAtLeast(0L)
-
-                if (knowledge.ok && knowledge.hasVerifiedData) {
-                    verifiedStoreDataUsed = true
-                    verifiedDataSnippet = buildVerifiedKnowledgeSnippet(knowledge)
-                    val pass2Prompt = buildPass2VerifiedSystemInstruction(
-                        aiSettings = aiSettings,
-                        senderName = input.rawTitle.ifBlank { input.senderName },
-                        localContextBlock = localContextBlock,
-                        verifiedSnippet = verifiedDataSnippet
-                    )
-                    val pass2Outcome = aiReplyEngine.runCollaborationTurn(
-                        settings = aiSettings,
-                        userMessage = input.messageText,
-                        systemInstruction = pass2Prompt,
-                        recentTurns = recentTurns
-                    )
-                    latencies["ai_compose_final"] = pass2Outcome.primaryLatencyMs + pass2Outcome.fallbackLatencyMs
-                    switchedToQwen = switchedToQwen || pass2Outcome.switchedToFallback
-                    activeEngineLabel = pass2Outcome.activeEngineLabel
-
-                    if (pass2Outcome.decision?.reply?.isNotBlank() == true) {
-                        finalDecision = pass2Outcome.decision
-                    } else {
-                        // Deterministic fallback from verified knowledge ONLY (no hallucination)
-                        val verifiedFallback = knowledge.summary.takeIf { it.isNotBlank() }
-                            ?: knowledge.facts.joinToString("\n").takeIf { it.isNotBlank() }
-                        if (!verifiedFallback.isNullOrBlank()) {
-                            finalDecision = finalDecision.copy(reply = verifiedFallback)
-                        } else {
-                            return CollaborationOutcome(
-                                replyText = null,
-                                conversationKey = conversationKey,
-                                usedNewApi = usedNewApiFlag,
-                                usedPrimaryEngine = pass1Outcome.primaryEngineLabel,
-                                activeEngine = activeEngineLabel,
-                                switchedToQwen = switchedToQwen,
-                                calledSmartAdvisor = true,
-                                saIntent = saIntent,
-                                verifiedStoreDataUsed = false,
-                                memoryLoaded = memoryLoaded,
-                                redactedError = pass2Outcome.redactedError ?: "تعذر صياغة الرد النهائي",
-                                stageLatenciesMs = latencies,
-                                currentTopic = contextEntity.currentTopic
-                            )
-                        }
-                    }
-                } else {
-                    // HTTP 403 disabled OR has_verified_data == false -> refuse fabrication!
-                    verifiedStoreDataUsed = false
-                    verifiedDataSnippet = knowledge.error ?: "لا توجد بيانات مؤكدة من المتجر"
-                    val noDataPass2 = buildNoVerifiedDataReply(
-                        knowledge = knowledge,
-                        fallbackFromPass1 = finalDecision.reply
-                    )
-                    finalDecision = finalDecision.copy(
-                        reply = noDataPass2,
-                        needsHuman = finalDecision.needsHuman || !knowledge.ok || !knowledge.hasVerifiedData
-                    )
-                }
-            } else if (finalDecision.reply.isBlank()) {
-                // Store data requested, Smart Advisor disabled/unavailable -> avoid hallucination
-                finalDecision = finalDecision.copy(
-                    reply = "لا تتوفر لديّ بيانات المتجر المؤكدة حالياً، يمكنك تأكيد سؤالك وسيتابع معك فريق خدمة العملاء.",
+        // Guard against SA returning 403 / has_verified_data=false even if synthesis repeated a guessed price
+        if (lastFailedKnowledge != null && !verifiedStoreDataUsed) {
+            val sanitizedSafe = buildNoVerifiedDataReply(lastFailedKnowledge, currentDecision.reply)
+            if (currentDecision.reply.isBlank() ||
+                containsSpeculativePriceOrStock(currentDecision.reply)
+            ) {
+                currentDecision = currentDecision.copy(
+                    reply = sanitizedSafe,
                     needsHuman = true
                 )
+            }
+        } else if (requestsStoreKnowledge(currentDecision) && !saAvailable && currentDecision.reply.isBlank()) {
+            currentDecision = currentDecision.copy(
+                reply = "لا تتوفر لديّ بيانات المتجر المؤكدة حالياً، يمكنك تأكيد سؤالك وسيتابع معك فريق خدمة العملاء.",
+                needsHuman = true
+            )
+        } else if (currentDecision.reply.isBlank()) {
+            val safe = buildSafeToolFallbackReply(
+                lastVerifiedKnowledge = lastVerifiedKnowledge,
+                lastFailedKnowledge = lastFailedKnowledge,
+                webhookDataSnippet = webhookDataSnippet,
+                fallbackDraft = ""
+            )
+            if (safe.isNotBlank()) {
+                currentDecision = currentDecision.copy(reply = safe)
             }
         }
 
         // Durable Memory Update via Encrypted Outbox (consent-gated, DM-only, never in sandbox)
         var memoryUpdated = false
         var consentRequiredFlag = false
-        val memProposal = finalDecision.memoryUpdate
+        val memProposal = currentDecision.memoryUpdate
         if (!input.isSandbox &&
             !input.isGroup &&
             aiSettings.syncCustomerMemory &&
@@ -376,15 +742,16 @@ class SmartCollaborationCoordinator(
             }
         }
 
-        val cleanedReply = finalDecision.reply
+        val cleanedReply = currentDecision.reply
             .trim()
             .takeIf { it.isNotBlank() }
             ?.let { raw ->
-                if (!input.isSandbox && deliveryContainsEphemeralLink) {
+                val scrubbed = if (!input.isSandbox && deliveryContainsEphemeralLink) {
                     secretVault.redact(raw)
                 } else {
                     SensitiveDataRedactor.scrub(raw, secretVault)
                 }
+                secretVault.redact(scrubbed)
             }
 
         return CollaborationOutcome(
@@ -395,17 +762,70 @@ class SmartCollaborationCoordinator(
             activeEngine = activeEngineLabel,
             switchedToQwen = switchedToQwen,
             calledSmartAdvisor = calledSmartAdvisor,
+            calledWebhook = calledWebhook,
             saIntent = saIntent,
+            saToolReason = saToolReason,
+            webhookToolReason = webhookToolReason,
+            webhookDataSnippet = SensitiveDataRedactor.scrub(webhookDataSnippet, secretVault),
+            webhookStatusCode = webhookStatusCode,
+            invokedTools = invokedTools.toList(),
+            toolRoundsUsed = roundsUsed,
             verifiedStoreDataUsed = verifiedStoreDataUsed,
             verifiedDataSnippet = SensitiveDataRedactor.scrub(verifiedDataSnippet, secretVault),
             memoryLoaded = memoryLoaded,
             memoryUpdated = memoryUpdated,
-            needsHuman = finalDecision.needsHuman,
+            needsHuman = currentDecision.needsHuman,
             consentRequiredForMemory = consentRequiredFlag,
             redactedError = finalRedactedError,
             stageLatenciesMs = latencies,
             currentTopic = contextEntity.currentTopic
         )
+    }
+
+    private fun requestsStoreKnowledge(d: AIReplyEngine.AiStructuredDecision): Boolean =
+        d.needsStoreData || d.toolRequests.any {
+            it.tool == "smart_advisor" || it.tool == "smartadvisor" || it.tool == "sa"
+        }
+
+    private fun requestsWebhookTool(d: AIReplyEngine.AiStructuredDecision): Boolean =
+        d.needsWebhookData || d.toolRequests.any {
+            it.tool == "webhook" || it.tool == "server" || it.tool == "external_webhook"
+        }
+
+    private fun isExplicitAccountRequest(messageText: String, action: String): Boolean {
+        val norm = messageText.trim().lowercase()
+        return when (action) {
+            "magic_login" -> norm.contains("رابط") || norm.contains("دخول") || norm.contains("تسجيل الدخول") || norm.contains("login")
+            "register" -> norm.contains("سجل") || norm.contains("تسجيل") || norm.contains("حساب") || norm.contains("register")
+            else -> false
+        }
+    }
+
+    private fun containsSpeculativePriceOrStock(text: String): Boolean {
+        return text.contains("ريال") ||
+            text.contains("سعر") ||
+            text.contains("متوفر") ||
+            Regex("""\b\d{2,5}\b""").containsMatchIn(text)
+    }
+
+    private fun buildSafeToolFallbackReply(
+        lastVerifiedKnowledge: SmartAdvisorClient.SaKnowledgeResponse?,
+        lastFailedKnowledge: SmartAdvisorClient.SaKnowledgeResponse?,
+        webhookDataSnippet: String,
+        fallbackDraft: String
+    ): String {
+        if (lastVerifiedKnowledge != null) {
+            val verified = lastVerifiedKnowledge.summary.takeIf { it.isNotBlank() }
+                ?: lastVerifiedKnowledge.facts.joinToString("\n").takeIf { it.isNotBlank() }
+            if (!verified.isNullOrBlank()) return verified
+        }
+        if (lastFailedKnowledge != null) {
+            return buildNoVerifiedDataReply(lastFailedKnowledge, fallbackDraft)
+        }
+        if (webhookDataSnippet.isNotBlank()) {
+            return "تم التحقق من النظام الخارجي: $webhookDataSnippet"
+        }
+        return fallbackDraft
     }
 
     private suspend fun composeAccountActionReply(
@@ -414,7 +834,6 @@ class SmartCollaborationCoordinator(
         recentTurns: List<AIReplyEngine.ChatTurn>,
         userMessage: String
     ): String? {
-        // Send ONLY ephemeral safe notice + pass link safely for direct send without storing token in DB!
         if (actionRes.linkCreated && actionRes.ephemeralLoginUrl.isNotBlank()) {
             return "تم تجهيز رابط الدخول السريع لحسابك: ${actionRes.ephemeralLoginUrl}"
         }
@@ -441,8 +860,7 @@ class SmartCollaborationCoordinator(
             return "تعذر التحقق من بيانات المتجر حالياً، يرجى المحاولة لاحقاً أو انتظار رد خدمة العملاء."
         }
         if (fallbackFromPass1.isNotBlank() &&
-            !fallbackFromPass1.contains("سعر", ignoreCase = true) &&
-            !fallbackFromPass1.contains("متوفر", ignoreCase = true)
+            !containsSpeculativePriceOrStock(fallbackFromPass1)
         ) {
             return fallbackFromPass1
         }
@@ -477,13 +895,15 @@ class SmartCollaborationCoordinator(
         localContextBlock: String,
         serverMemoryBlock: String,
         saAvailable: Boolean,
-        capabilities: SmartAdvisorClient.SaCapabilities?
+        capabilities: SmartAdvisorClient.SaCapabilities?,
+        webhookToolAvailable: Boolean,
+        webhookConfig: ServerConfigEntity?
     ): String {
         return buildString {
             if (aiSettings.systemPrompt.isNotBlank()) {
                 append(aiSettings.systemPrompt.trim()).append("\n\n")
             }
-            append("أنت مساعد المحادثة الذكي في تطبيق AutoMate AI. ")
+            append("أنت المنسّق الوحيد للمحادثة (Single Conversation Orchestrator) في تطبيق AutoMate AI. ")
             append("العميل: ").append(senderName).append(" (")
                 .append(if (isGroup) "محادثة جماعية" else "محادثة خاصة").append(").\n")
             if (localContextBlock.isNotBlank()) {
@@ -492,33 +912,69 @@ class SmartCollaborationCoordinator(
             if (serverMemoryBlock.isNotBlank()) {
                 append("\nذاكرة العميل الدائمة المؤكدة:\n").append(serverMemoryBlock).append('\n')
             }
+            append("\nالأدوات المتاحة لك عند الحاجة:\n")
+            if (saAvailable) {
+                append("1. أداة Smart Advisor (بيانات المتجر المؤكدة WooCommerce: المنتجات، الأسعار، المخزون، السياسات، وإجراءات الحساب في الخاص فقط).\n")
+            } else {
+                append("1. أداة Smart Advisor غير مفعلة حالياً.\n")
+            }
+            if (webhookToolAvailable && webhookConfig != null) {
+                append("2. أداة Webhook الخارجي: ").append(webhookConfig.effectiveToolDescription()).append('\n')
+            } else {
+                append("2. أداة Webhook الخارجي غير مفعلة حالياً.\n")
+            }
             append("\nالتعليمات الصارمة:\n")
-            append("- أجب بصيغة JSON صالحة بهذه الحقول: intent, confidence, needs_store_data, store_query, store_intent, needs_human, reply, account_action, memory_update.\n")
+            append("- أجب بصيغة JSON صالحة بهذه الحقول: intent, confidence, needs_store_data, store_query, store_intent, needs_webhook_data, webhook_query, webhook_reason, tool_requests, needs_human, reply, account_action, account_action_confirmed, memory_update.\n")
             append("- قيم store_intent المسموحة: product_search, product_details, offers, store_info, store_location, shipping_policy, returns_policy, general.\n")
-            append("- لا تخترع أسعاراً أو توفر منتجات أو سياسات متجر؛ إذا احتجت بيانات المتجر اجعل needs_store_data=true.\n")
+            append("- يمكنك استدعاء Smart Advisor فقط أو Webhook فقط أو كليهما معاً أو عدم استدعاء أي أداة إذا كانت الرسالة محادثة عامة.\n")
+            append("- لا تخترع أسعاراً أو توفر منتجات أو حالات طلبات؛ إذا احتجت بيانات المتجر اجعل needs_store_data=true، وإذا احتجت النظام الخارجي اجعل needs_webhook_data=true.\n")
             if (!saAvailable || capabilities?.accountActionsEnabled != true) {
                 append("- إجراءات الحساب غير متاحة حالياً.\n")
             }
         }.trim()
     }
 
-    private fun buildPass2VerifiedSystemInstruction(
+    private fun buildToolSynthesisSystemInstruction(
         aiSettings: AiSettingsState,
         senderName: String,
         localContextBlock: String,
-        verifiedSnippet: String
+        toolNotes: List<CollectedToolNote>,
+        allowMoreTools: Boolean,
+        saAvailable: Boolean,
+        webhookToolAvailable: Boolean,
+        webhookConfig: ServerConfigEntity?
     ): String {
         return buildString {
             if (aiSettings.systemPrompt.isNotBlank()) {
                 append(aiSettings.systemPrompt.trim()).append("\n\n")
             }
-            append("العميل: ").append(senderName).append('\n')
+            append("أنت المنسّق الوحيد للمحادثة. العميل: ").append(senderName).append('\n')
             if (localContextBlock.isNotBlank()) {
                 append("سياق الجلسة:\n").append(localContextBlock).append('\n')
             }
-            append("\nبيانات المتجر المؤكدة (التزم بها حرفياً ولا تخترع أي معلومة إضافية):\n")
-            append(verifiedSnippet).append('\n')
-            append("\nأعد بصيغة JSON تحتوي الحقل reply باللغة العربية وبأسلوب مهذب ومختصر مع confidence و needs_human.")
+            append("\nنتائج الأدوات المسترجعة (التزم بها حرفياً ولا تخترع أي معلومة إضافية):\n")
+            toolNotes.forEachIndexed { idx, note ->
+                append("${idx + 1}. [${note.toolLabel} | ${note.trustLabel}] (استعلام: ${note.query}):\n")
+                append(note.content).append('\n')
+            }
+            append("\nتعليمات الصياغة النهائية:\n")
+            append("- ميّز بوضوح بين بيانات Smart Advisor المؤكدة من المتجر وبيانات Webhook الخارجي (لا تنسب بيانات Webhook الخارجي كسياسة متجر مؤكدة إذا لم تُؤكد).\n")
+            append("- إذا تعذر استرجاع معلومة مطلوبة أو فشلت أداة، صِغ رداً مهذباً واضحاً دون اختلاق أي رقم أو حالة أو سعر.\n")
+            if (allowMoreTools && (saAvailable || webhookToolAvailable)) {
+                append("- إذا كنت تحتاج لاستدعاء أداة أخرى مختلفة لم تُستدعَ بعد، يمكنك طلبها، وإلا اكتب الرد النهائي مباشرة.\n")
+                if (webhookToolAvailable && webhookConfig != null) {
+                    append("- وصف أداة Webhook المتاحة: ").append(webhookConfig.effectiveToolDescription()).append('\n')
+                }
+            } else {
+                append("- اكتملت جولات الأدوات؛ أرسل الآن الرد النهائي الموحد للعميل.\n")
+            }
+            append("- أعد بصيغة JSON تحتوي الحقل reply باللغة العربية وبأسلوب مهذب ومختصر مع confidence و needs_human.")
         }.trim()
+    }
+
+    companion object {
+        const val MAX_TOOL_ROUNDS = 2
+        const val TOOL_SMART_ADVISOR = "Smart Advisor"
+        const val TOOL_WEBHOOK = "Webhook"
     }
 }

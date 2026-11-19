@@ -175,7 +175,7 @@ fun SaSettingsScreen(
                                         style = MaterialTheme.typography.titleMedium
                                     )
                                     Text(
-                                        text = "ربط المتجر الإلكتروني للردود الذكية على العملاء",
+                                        text = "مصدر بيانات متجرك الموثوقة (WooCommerce: المنتجات، الأسعار، الطلبات، السياسات) كأداة للمنسّق الذكي.",
                                         style = MaterialTheme.typography.bodyMedium,
                                         color = MaterialTheme.colorScheme.onSurfaceVariant
                                     )

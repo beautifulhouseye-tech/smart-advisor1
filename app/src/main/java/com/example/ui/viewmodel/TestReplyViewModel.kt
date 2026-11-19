@@ -35,7 +35,14 @@ data class TestChatMessage(
     val activeEngineLabel: String = "",
     val switchedToQwen: Boolean = false,
     val calledSmartAdvisor: Boolean = false,
+    val calledWebhook: Boolean = false,
     val detectedIntent: String = "",
+    val saToolReason: String = "",
+    val webhookToolReason: String = "",
+    val webhookDataSnippet: String = "",
+    val webhookStatusCode: Int? = null,
+    val invokedTools: List<String> = emptyList(),
+    val toolRoundsUsed: Int = 0,
     val verifiedStoreDataUsed: Boolean = false,
     val verifiedDataSnippet: String = "",
     val memoryLoaded: Boolean = false,
@@ -103,8 +110,16 @@ class TestReplyViewModel internal constructor(
                     if (ai.primaryBaseUrl.isNotBlank()) add("New API") else add("AI")
                     if (ai.fallbackEnabled) add(ai.effectiveOllamaModel())
                 }
-                if (server?.isEnabled == true) add("Webhook")
-                if (smartAdvisorPrefs.enabled) add("Smart Advisor")
+                if (server?.isEnabled == true) {
+                    if (ai.enabled && server.effectiveWebhookMode() == com.example.data.local.entity.WebhookMode.AI_TOOL) {
+                        add("أداة: Webhook")
+                    } else if (!ai.enabled && server.effectiveWebhookMode() == com.example.data.local.entity.WebhookMode.STANDALONE_FALLBACK) {
+                        add("Webhook")
+                    }
+                }
+                if (smartAdvisorPrefs.enabled) {
+                    add(if (ai.enabled) "أداة: Smart Advisor" else "Smart Advisor")
+                }
             }
             _uiState.update {
                 it.copy(activePipelineSummary = parts.joinToString(" • "))
@@ -172,7 +187,14 @@ class TestReplyViewModel internal constructor(
                 activeEngineLabel = result.activeEngineLabel,
                 switchedToQwen = result.switchedToQwen,
                 calledSmartAdvisor = result.calledSmartAdvisor,
+                calledWebhook = result.calledWebhook,
                 detectedIntent = result.detectedIntent,
+                saToolReason = result.saToolReason,
+                webhookToolReason = result.webhookToolReason,
+                webhookDataSnippet = result.webhookDataSnippet,
+                webhookStatusCode = result.webhookStatusCode,
+                invokedTools = result.invokedTools,
+                toolRoundsUsed = result.toolRoundsUsed,
                 verifiedStoreDataUsed = result.verifiedStoreDataUsed,
                 verifiedDataSnippet = result.verifiedDataSnippet,
                 memoryLoaded = result.memoryLoaded,

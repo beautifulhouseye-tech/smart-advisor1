@@ -57,6 +57,13 @@ class AIReplyEngine @Inject constructor(
         val consentConfirmed: Boolean = false
     )
 
+    data class AiToolRequest(
+        val tool: String,
+        val query: String = "",
+        val intent: String = "general",
+        val reason: String = ""
+    )
+
     data class AiStructuredDecision(
         val reply: String = "",
         val intent: String = "general",
@@ -64,8 +71,13 @@ class AIReplyEngine @Inject constructor(
         val needsStoreData: Boolean = false,
         val storeQuery: String = "",
         val storeIntent: String = "general",
+        val needsWebhookData: Boolean = false,
+        val webhookQuery: String = "",
+        val webhookReason: String = "",
+        val toolRequests: List<AiToolRequest> = emptyList(),
         val needsHuman: Boolean = false,
         val accountAction: String = "",
+        val accountActionConfirmed: Boolean = false,
         val memoryUpdate: AiMemoryProposal? = null,
         val isStructuredJson: Boolean = false
     )
@@ -190,7 +202,7 @@ class AIReplyEngine @Inject constructor(
 
         if (!primaryResult.text.isNullOrBlank()) {
             val decision = parseStructuredDecision(primaryResult.text)
-            if (decision != null && (decision.reply.isNotBlank() || decision.needsStoreData || decision.accountAction.isNotBlank())) {
+            if (decision != null && isUsableDecision(decision)) {
                 return CollaborationAiOutcome(
                     decision = decision,
                     primaryEngineLabel = primaryLabel,
@@ -226,7 +238,7 @@ class AIReplyEngine @Inject constructor(
 
         if (!fallbackResult.text.isNullOrBlank()) {
             val decision = parseStructuredDecision(fallbackResult.text)
-            if (decision != null && (decision.reply.isNotBlank() || decision.needsStoreData || decision.accountAction.isNotBlank())) {
+            if (decision != null && isUsableDecision(decision)) {
                 return CollaborationAiOutcome(
                     decision = decision,
                     primaryEngineLabel = primaryLabel,
@@ -769,6 +781,13 @@ class AIReplyEngine @Inject constructor(
         return parseGeminiResponse(result.body)
     }
 
+    private fun isUsableDecision(decision: AiStructuredDecision): Boolean =
+        decision.reply.isNotBlank() ||
+            decision.needsStoreData ||
+            decision.needsWebhookData ||
+            decision.toolRequests.isNotEmpty() ||
+            decision.accountAction.isNotBlank()
+
     fun parseStructuredDecision(rawText: String): AiStructuredDecision? {
         val trimmed = rawText.trim()
         if (trimmed.isEmpty()) return null
@@ -782,6 +801,10 @@ class AIReplyEngine @Inject constructor(
             if (parsedObj != null && (
                     parsedObj.containsKey("reply") ||
                         parsedObj.containsKey("needs_store_data") ||
+                        parsedObj.containsKey("needs_webhook_data") ||
+                        parsedObj.containsKey("tool_requests") ||
+                        parsedObj.containsKey("tools") ||
+                        parsedObj.containsKey("account_action") ||
                         parsedObj.containsKey("intent")
                     )
             ) {
@@ -801,6 +824,8 @@ class AIReplyEngine @Inject constructor(
                         it.constraints.isNotEmpty()
                 }
 
+                val parsedTools = parseToolRequests(parsedObj["tool_requests"] ?: parsedObj["tools"])
+
                 return AiStructuredDecision(
                     reply = parsedObj["reply"]?.jsonPrimitive?.contentOrNull?.trim().orEmpty(),
                     intent = parsedObj["intent"]?.jsonPrimitive?.contentOrNull?.trim().orEmpty()
@@ -810,8 +835,13 @@ class AIReplyEngine @Inject constructor(
                     storeQuery = parsedObj["store_query"]?.jsonPrimitive?.contentOrNull?.trim().orEmpty(),
                     storeIntent = parsedObj["store_intent"]?.jsonPrimitive?.contentOrNull?.trim().orEmpty()
                         .ifBlank { "general" },
+                    needsWebhookData = parsedObj["needs_webhook_data"]?.jsonPrimitive?.booleanOrNull == true,
+                    webhookQuery = parsedObj["webhook_query"]?.jsonPrimitive?.contentOrNull?.trim().orEmpty(),
+                    webhookReason = parsedObj["webhook_reason"]?.jsonPrimitive?.contentOrNull?.trim().orEmpty(),
+                    toolRequests = parsedTools,
                     needsHuman = parsedObj["needs_human"]?.jsonPrimitive?.booleanOrNull == true,
                     accountAction = parsedObj["account_action"]?.jsonPrimitive?.contentOrNull?.trim().orEmpty(),
+                    accountActionConfirmed = parsedObj["account_action_confirmed"]?.jsonPrimitive?.booleanOrNull == true,
                     memoryUpdate = memProposal,
                     isStructuredJson = true
                 )
@@ -826,6 +856,21 @@ class AIReplyEngine @Inject constructor(
             needsStoreData = false,
             isStructuredJson = false
         )
+    }
+
+    private fun parseToolRequests(element: kotlinx.serialization.json.JsonElement?): List<AiToolRequest> {
+        val arr = element as? JsonArray ?: return emptyList()
+        return arr.mapNotNull { entry ->
+            val obj = entry as? JsonObject ?: return@mapNotNull null
+            val toolName = obj["tool"]?.jsonPrimitive?.contentOrNull?.trim()?.lowercase().orEmpty()
+            if (toolName.isBlank()) return@mapNotNull null
+            AiToolRequest(
+                tool = toolName,
+                query = obj["query"]?.jsonPrimitive?.contentOrNull?.trim().orEmpty(),
+                intent = obj["intent"]?.jsonPrimitive?.contentOrNull?.trim().orEmpty().ifBlank { "general" },
+                reason = obj["reason"]?.jsonPrimitive?.contentOrNull?.trim().orEmpty()
+            )
+        }
     }
 
     private fun extractJsonObjectText(text: String): String? {

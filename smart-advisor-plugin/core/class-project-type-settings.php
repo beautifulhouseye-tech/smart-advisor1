@@ -66,6 +66,10 @@ class SA_Project_Type_Settings {
 
     public static function sanitize( $input ) {
         if ( ! is_array( $input ) ) return self::all();
+        $is_form_submit = ! empty( $input['_sa_form_submit'] );
+        unset( $input['_sa_form_submit'] );
+        $old = get_option( self::OPTION, [] );
+        if ( ! is_array( $old ) ) $old = [];
         $out = [];
         foreach ( $input as $raw_key => $raw ) {
             if ( ! is_array( $raw ) ) continue;
@@ -76,7 +80,10 @@ class SA_Project_Type_Settings {
             $category_rules = [];
             foreach ( (array) ( $raw['category_rules'] ?? [] ) as $term_id => $rule ) {
                 $term_id = absint( $term_id );
-                if ( ! $term_id || ! is_array( $rule ) || empty( $rule['enabled'] ) ) continue;
+                if ( ! $term_id || ! is_array( $rule ) ) continue;
+                $rule_has_enabled = $is_form_submit || array_key_exists( 'enabled', $rule );
+                if ( $rule_has_enabled && empty( $rule['enabled'] ) ) continue;
+                if ( ! $rule_has_enabled && absint( $rule['limit'] ?? 0 ) <= 0 ) continue;
                 $term = get_term( $term_id, 'product_cat' );
                 if ( ! $term || is_wp_error( $term ) ) continue;
                 $category_rules[ $term_id ] = [ 'limit' => max( 1, min( 30, absint( $rule['limit'] ?? 1 ) ) ) ];
@@ -93,7 +100,10 @@ class SA_Project_Type_Settings {
                 $question_type = sanitize_key( $question['type'] ?? 'single' );
                 if ( ! in_array( $question_type, [ 'single', 'multiple', 'yes_no', 'text', 'number' ], true ) ) $question_type = 'single';
                 $options = [];
-                foreach ( preg_split( '/\r\n|\r|\n/', (string) ( $question['options'] ?? '' ) ) as $option ) {
+                $raw_options = is_array( $question['options'] ?? null )
+                    ? $question['options']
+                    : preg_split( '/\r\n|\r|\n/', (string) ( $question['options'] ?? '' ) );
+                foreach ( (array) $raw_options as $option ) {
                     $option = sanitize_text_field( $option );
                     $option = function_exists( 'mb_substr' ) ? mb_substr( $option, 0, 120, 'UTF-8' ) : substr( $option, 0, 120 );
                     if ( '' !== $option && ! in_array( $option, $options, true ) ) $options[] = $option;
@@ -102,12 +112,18 @@ class SA_Project_Type_Settings {
                 if ( in_array( $question_type, [ 'single', 'multiple' ], true ) && ! $options ) continue;
                 $allowed_skills = [ 'product_advice', 'product_search', 'comparison', 'cart_guidance', 'project_advice', 'order_status', 'after_sales', 'complementary_products', 'project_followup', 'offers_discounts' ];
                 $linked_skills = array_values( array_intersect( $allowed_skills, array_map( 'sanitize_key', (array) ( $question['skills'] ?? [] ) ) ) );
-                $questions[] = [ 'key'=>$question_key, 'label'=>$label, 'type'=>$question_type, 'options'=>$options, 'required'=>empty( $question['required'] ) ? 0 : 1, 'save_answer'=>isset($question['save_answer']) ? (int) ! empty($question['save_answer']) : 1, 'use_in_chat'=>! empty($question['use_in_chat']) ? 1 : 0, 'skills'=>$linked_skills ];
+                $save_answer = ( $is_form_submit || array_key_exists( 'save_answer', $question ) )
+                    ? ( ! empty( $question['save_answer'] ) ? 1 : 0 )
+                    : 1;
+                $questions[] = [ 'key'=>$question_key, 'label'=>$label, 'type'=>$question_type, 'options'=>$options, 'required'=>empty( $question['required'] ) ? 0 : 1, 'save_answer'=>$save_answer, 'use_in_chat'=>! empty($question['use_in_chat']) ? 1 : 0, 'skills'=>$linked_skills ];
                 if ( count( $questions ) >= 20 ) break;
             }
+            $type_name = sanitize_text_field( $raw['name'] ?? '' );
+            if ( '' === $type_name ) $type_name = sanitize_text_field( $old[ $key ]['name'] ?? $key );
+            $aliases = sanitize_textarea_field( str_replace( '\\n', "\n", (string) ( $raw['aliases'] ?? '' ) ) );
             $out[ $key ] = [
-                'name'=>sanitize_text_field( $raw['name'] ?? $key ),
-                'aliases'=>sanitize_textarea_field( $raw['aliases'] ?? '' ),
+                'name'=>$type_name,
+                'aliases'=>$aliases,
                 'enabled'=>empty( $raw['enabled'] ) ? 0 : 1,
                 'sort'=>$sort,
                 'min_rating'=>max( 0, min( 5, (float) ( $raw['min_rating'] ?? 0 ) ) ),
@@ -116,7 +132,11 @@ class SA_Project_Type_Settings {
                 'questions'=>$questions,
             ];
         }
-        return $out ?: self::all();
+        $result = $out ?: self::all();
+        if ( class_exists( 'SA_Settings' ) ) {
+            SA_Settings::record_pending_write( self::OPTION, $result );
+        }
+        return $result;
     }
 
     /** Return only answers explicitly linked to a named assistant skill for an owned active project. */
@@ -205,10 +225,18 @@ class SA_Project_Type_Settings {
         if ( ! current_user_can( 'manage_options' ) ) return;
         $types = self::all();
         ?>
-        <div class="wrap"><h1>إعدادات أنواع المشاريع</h1>
+        <div class="wrap" dir="rtl"><h1>إعدادات أنواع المشاريع</h1>
+        <?php
+        if ( class_exists( 'SA_Settings' ) ) {
+            SA_Settings::render_save_notices( '✅ تم حفظ إعدادات أنواع المشاريع والتحقق من تخزينها بنجاح.' );
+        } elseif ( function_exists( 'settings_errors' ) ) {
+            settings_errors();
+        }
+        ?>
         <p>أنشئ أنواع المشاريع وحدد نطاق المنتجات والتصنيفات وعدد النتائج وطريقة ترتيبها. التغييرات تؤثر على الخطط الجديدة بعد الحفظ.</p>
-        <form method="post" action="options.php">
+        <form id="sa-project-types-form" method="post" action="options.php">
         <?php settings_fields( 'sa_project_types_group' ); ?>
+        <input type="hidden" name="<?php echo esc_attr( self::OPTION ); ?>[_sa_form_submit]" value="1">
         <div id="sa-project-types-list">
         <?php foreach ( $types as $key => $type ) : self::render_type( $key, $type ); endforeach; ?>
         </div>
@@ -228,22 +256,36 @@ class SA_Project_Type_Settings {
 .sa-category-item{background:#fff;padding:6px 10px !important;border:1px solid #eee !important;border-radius:4px;display:flex;align-items:center;justify-content:space-between}
 @media(max-width:782px){.sa-category-tree{grid-template-columns:1fr}}</style>
         <script>(function(){
-          var root=document.getElementById('sa-project-types-list'), add=document.getElementById('sa-add-project-type'), n=Date.now();
+          var form=document.getElementById('sa-project-types-form'), root=document.getElementById('sa-project-types-list'), add=document.getElementById('sa-add-project-type'), n=Date.now(), qSeq=0;
           var cats=<?php $js_cats=get_terms(['taxonomy'=>'product_cat','hide_empty'=>false,'orderby'=>'name','order'=>'ASC']); if(is_wp_error($js_cats))$js_cats=[]; echo wp_json_encode(array_map(function($t){return ['id'=>(int)$t->term_id,'name'=>$t->name,'parent'=>(int)$t->parent,'count'=>(int)$t->count];},$js_cats)); ?>;
           function esc(v){return String(v||'').replace(/[&<>"']/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}[c];});}
-          function card(key){var d=document.createElement('section');d.className='sa-project-type';
-            d.innerHTML='<h2>نوع مشروع جديد</h2><p><label>اسم النوع الظاهر<br><input required class="regular-text" name="<?php echo esc_js(self::OPTION); ?>['+key+'][name]"></label></p><p><label>عبارات التعرف على المشروع (كل عبارة في سطر)<br><textarea class="wide" name="<?php echo esc_js(self::OPTION); ?>['+key+'][aliases]"></textarea></label></p><input type="hidden" name="<?php echo esc_js(self::OPTION); ?>['+key+'][enabled]" value="1"><input type="hidden" name="<?php echo esc_js(self::OPTION); ?>['+key+'][category_rules_enabled]" value="1"><p><label>ترتيب النتائج <select name="<?php echo esc_js(self::OPTION); ?>['+key+'][sort]"><option value="rating_sales">الأعلى تقييماً ثم الأكثر مبيعاً</option><option value="sales">الأكثر مبيعاً</option><option value="newest">الأحدث</option><option value="relevance">الأكثر صلة</option><option value="price_asc">السعر الأقل</option><option value="price_desc">السعر الأعلى</option></select></label>　<label>أقل تقييم <input type="number" min="0" max="5" step="0.1" name="<?php echo esc_js(self::OPTION); ?>['+key+'][min_rating]" value="0" style="width:75px"></label></p><button type="button" class="button-link-delete sa-remove-type">حذف النوع</button>';
-            addCategoryPicker(d,key,{});addQuestionBuilder(d,key,[]);d.querySelector('.sa-remove-type').onclick=function(){d.remove();};return d;}
-          function addCategoryPicker(d,key,selected){var title=document.createElement('h3');title.textContent='تصنيفات WooCommerce المعتمدة لهذا المشروع';d.appendChild(title);var box=document.createElement('div');box.style='max-height:420px;overflow:auto;border:1px solid #ddd;padding:10px;margin:10px 0';
-            cats.forEach(function(t){var row=document.createElement('div');row.style='display:flex;gap:10px;align-items:center;padding:5px 0;padding-right:'+(t.parent?18:0)+'px';row.innerHTML='<label style="flex:1"><input type="checkbox" name="<?php echo esc_js(self::OPTION); ?>['+key+'][category_rules]['+t.id+'][enabled]" value="1" '+(selected[t.id]?'checked':'')+'> '+esc(t.name)+' <small>('+t.count+')</small></label><label>عدد المنتجات <input type="number" min="1" max="30" name="<?php echo esc_js(self::OPTION); ?>['+key+'][category_rules]['+t.id+'][limit]" value="'+(selected[t.id]||1)+'" style="width:65px"></label>';box.appendChild(row);});d.appendChild(box);}
+          function syncCategoryItem(row){var cb=row&&row.querySelector('.sa-cat-enable'), num=row&&row.querySelector('.sa-cat-limit'); if(cb&&num){num.disabled=!cb.checked;}}
+          if(root){
+            root.querySelectorAll('.sa-category-item').forEach(syncCategoryItem);
+            root.addEventListener('change',function(e){if(e.target&&e.target.classList.contains('sa-cat-enable')){syncCategoryItem(e.target.closest('.sa-category-item'));}});
+            root.addEventListener('click',function(e){if(e.target&&e.target.classList.contains('sa-remove-type')){var card=e.target.closest('.sa-project-type');if(card)card.remove();}});
+            root.addEventListener('input',function(e){if(e.target&&e.target.classList.contains('sa-type-name-input')){var card=e.target.closest('.sa-project-type'), ttl=card&&card.querySelector('.sa-type-title');if(ttl)ttl.textContent=e.target.value.trim()||'نوع مشروع جديد';}});
+          }
+          if(form){
+            form.addEventListener('invalid',function(e){var details=e.target&&e.target.closest('details.sa-project-type');if(details&&!details.open){details.open=true;}},true);
+          }
+          function card(key){
+            var d=document.createElement('details');d.className='sa-project-type';d.open=true;
+            d.innerHTML='<summary><span class="sa-type-title">نوع مشروع جديد</span> <small style="color:#666;font-size:0.8em;font-weight:normal;margin-right:8px;">('+esc(key)+')</small></summary><div class="sa-inner-pad"><p><label><input type="checkbox" name="<?php echo esc_js(self::OPTION); ?>['+key+'][enabled]" value="1" checked> تفعيل هذا النوع</label></p><p><label>اسم النوع الظاهر<br><input required class="regular-text sa-type-name-input" name="<?php echo esc_js(self::OPTION); ?>['+key+'][name]" value=""></label></p><p><label>عبارات التعرف على المشروع (كل عبارة في سطر)<br><textarea class="wide" name="<?php echo esc_js(self::OPTION); ?>['+key+'][aliases]"></textarea></label></p><input type="hidden" name="<?php echo esc_js(self::OPTION); ?>['+key+'][category_rules_enabled]" value="1"><p><label>ترتيب النتائج <select name="<?php echo esc_js(self::OPTION); ?>['+key+'][sort]"><option value="rating_sales">الأعلى تقييماً ثم الأكثر مبيعاً</option><option value="sales">الأكثر مبيعاً</option><option value="newest">الأحدث</option><option value="relevance">الأكثر صلة</option><option value="price_asc">السعر الأقل</option><option value="price_desc">السعر الأعلى</option></select></label>　<label>أقل تقييم <input type="number" min="0" max="5" step="0.1" name="<?php echo esc_js(self::OPTION); ?>['+key+'][min_rating]" value="0" style="width:75px"></label></p><p><button type="button" class="button-link-delete sa-remove-type">حذف النوع</button></p></div>';
+            var inner=d.querySelector('.sa-inner-pad');
+            addCategoryPicker(inner,key,{});addQuestionBuilder(inner,key,[]);
+            return d;
+          }
+          function addCategoryPicker(d,key,selected){var title=document.createElement('h3');title.textContent='تصنيفات WooCommerce المعتمدة لهذا المشروع';d.appendChild(title);var box=document.createElement('div');box.className='sa-category-tree';
+            cats.forEach(function(t){var isChecked=!!selected[t.id];var row=document.createElement('div');row.className='sa-category-item';row.style.paddingRight=(t.parent?18:0)+'px';row.innerHTML='<label style="flex:1"><input type="checkbox" class="sa-cat-enable" name="<?php echo esc_js(self::OPTION); ?>['+key+'][category_rules]['+t.id+'][enabled]" value="1" '+(isChecked?'checked':'')+'> '+esc(t.name)+' <small>('+t.count+')</small></label><label>عدد المنتجات <input type="number" class="sa-cat-limit" min="1" max="30" name="<?php echo esc_js(self::OPTION); ?>['+key+'][category_rules]['+t.id+'][limit]" value="'+(selected[t.id]||1)+'" style="width:65px" '+(isChecked?'':'disabled')+'></label>';box.appendChild(row);});d.appendChild(box);}
           var skillLabels={product_advice:'استشارات المنتجات',product_search:'البحث الذكي عن المنتجات',comparison:'مقارنة المنتجات',cart_guidance:'المساعدة في السلة',project_advice:'استشارات المشاريع',order_status:'الاستفسار عن حالة الطلب',after_sales:'خدمة ما بعد البيع',complementary_products:'اكتشاف المنتجات المكملة',project_followup:'متابعة احتياجات المشاريع',offers_discounts:'العروض والخصومات'};
           function skillChecks(base,selected){return Object.keys(skillLabels).map(function(k){return '<label style="display:inline-block;margin:4px 10px 4px 0"><input type="checkbox" name="'+base+'[skills][]" value="'+k+'" '+(selected.indexOf(k)>-1?'checked':'')+'> '+skillLabels[k]+'</label>';}).join('');}
           function addQuestionBuilder(d,key,items){var wrap=document.createElement('div');wrap.className='sa-question-builder';wrap.style='border-top:1px solid #ddd;margin-top:18px;padding-top:12px';var h=document.createElement('h3');h.textContent='أسئلة هذا النوع من المشاريع';wrap.appendChild(h);var list=document.createElement('div');wrap.appendChild(list);
             function row(q,i){q=q||{};var box=document.createElement('div');box.style='border:1px solid #e1e4e8;padding:10px;margin:8px 0;background:#fafafa';var base='<?php echo esc_js(self::OPTION); ?>['+key+'][questions]['+i+']';
-              box.innerHTML='<input type="hidden" name="'+base+'[key]" value="'+esc(q.key||('q_'+Date.now()+'_'+i))+'"><p><label>نص السؤال<br><input class="wide" required name="'+base+'[label]" value="'+esc(q.label||'')+'"></label></p><p><label>نوع الإجابة <select name="'+base+'[type]"><option value="single">اختيار واحد</option><option value="multiple">اختيار متعدد</option><option value="yes_no">نعم / لا</option><option value="text">نص قصير</option><option value="number">رقم</option></select></label>　<label><input type="checkbox" name="'+base+'[required]" value="1" '+(q.required?'checked':'')+'> سؤال إجباري</label></p><p><label>الخيارات (كل خيار في سطر، للاختيار الواحد والمتعدد)<br><textarea class="wide" rows="3" name="'+base+'[options]">'+esc((q.options||[]).join('\n'))+'</textarea></label></p><fieldset style="border:1px solid #ddd;padding:10px"><legend>ربط الإجابة بالمساعد</legend><label><input type="checkbox" name="'+base+'[save_answer]" value="1" '+(q.save_answer===0?'':'checked')+'> حفظ الإجابة ضمن المشروع</label><br><label><input type="checkbox" name="'+base+'[use_in_chat]" value="1" '+(q.use_in_chat?'checked':'')+'> استخدام الإجابة في محادثة المساعد لهذا المشروع</label><p>المهارات المسموح لها باستخدام الإجابة:</p>'+skillChecks(base,q.skills||[])+'</fieldset><button type="button" class="button-link-delete">حذف السؤال</button>';
+              box.innerHTML='<input type="hidden" name="'+base+'[key]" value="'+esc(q.key||('q_'+Date.now()+'_'+(++qSeq)))+'"><p><label>نص السؤال<br><input class="wide" name="'+base+'[label]" value="'+esc(q.label||'')+'"></label></p><p><label>نوع الإجابة <select name="'+base+'[type]"><option value="single">اختيار واحد</option><option value="multiple">اختيار متعدد</option><option value="yes_no">نعم / لا</option><option value="text">نص قصير</option><option value="number">رقم</option></select></label>　<label><input type="checkbox" name="'+base+'[required]" value="1" '+(q.required?'checked':'')+'> سؤال إجباري</label></p><p><label>الخيارات (كل خيار في سطر، للاختيار الواحد والمتعدد)<br><textarea class="wide" rows="3" name="'+base+'[options]">'+esc((q.options||[]).join('\n'))+'</textarea></label></p><fieldset style="border:1px solid #ddd;padding:10px"><legend>ربط الإجابة بالمساعد</legend><input type="hidden" name="'+base+'[save_answer]" value="0"><label><input type="checkbox" name="'+base+'[save_answer]" value="1" '+(q.save_answer===0?'':'checked')+'> حفظ الإجابة ضمن المشروع</label><br><label><input type="checkbox" name="'+base+'[use_in_chat]" value="1" '+(q.use_in_chat?'checked':'')+'> استخدام الإجابة في محادثة المساعد لهذا المشروع</label><p>المهارات المسموح لها باستخدام الإجابة:</p>'+skillChecks(base,q.skills||[])+'</fieldset><button type="button" class="button-link-delete">حذف السؤال</button>';
               box.querySelector('select').value=q.type||'single';box.querySelector('button').onclick=function(){box.remove();};list.appendChild(box);}
-            (items||[]).forEach(function(q,i){row(q,i);});var b=document.createElement('button');b.type='button';b.className='button';b.textContent='+ إضافة سؤال';b.onclick=function(){row({},Date.now());};wrap.appendChild(b);d.appendChild(wrap);}
-          add.onclick=function(){root.appendChild(card('custom_'+(++n)));};
+            (items||[]).forEach(function(q,i){row(q,i);});var b=document.createElement('button');b.type='button';b.className='button';b.textContent='+ إضافة سؤال';b.onclick=function(){row({},Date.now()+'_'+(++qSeq));};wrap.appendChild(b);d.appendChild(wrap);}
+          if(add){add.onclick=function(){root.appendChild(card('custom_'+(++n)));};}
         })();</script>
         <?php
     }
@@ -262,8 +304,8 @@ class SA_Project_Type_Settings {
             foreach ( $children[ $parent ] ?? [] as $term ) {
                 $id = (int) $term->term_id; $selected = isset( $rules[ $id ] ); $limit = $selected ? (int) $rules[ $id ]['limit'] : 1;
                 echo '<div class="sa-category-item" data-search="' . esc_attr( ( function_exists( 'mb_strtolower' ) ? mb_strtolower( $term->name, 'UTF-8' ) : strtolower( $term->name ) ) ) . '" style="padding-right:' . (int) ( $depth * 12 ) . 'px;">';
-                echo '<label style="flex:1"><input type="checkbox" name="' . esc_attr( $base . '[' . $id . '][enabled]' ) . '" value="1" ' . checked( $selected, true, false ) . '> ' . esc_html( $term->name ) . ' <small style="color:#777">(' . (int) $term->count . ')</small></label>';
-                echo '<label>عدد المنتجات <input type="number" min="1" max="30" name="' . esc_attr( $base . '[' . $id . '][limit]' ) . '" value="' . esc_attr( $limit ) . '" style="width:65px"></label>';
+                echo '<label style="flex:1"><input type="checkbox" class="sa-cat-enable" name="' . esc_attr( $base . '[' . $id . '][enabled]' ) . '" value="1" ' . checked( $selected, true, false ) . '> ' . esc_html( $term->name ) . ' <small style="color:#777">(' . (int) $term->count . ')</small></label>';
+                echo '<label>عدد المنتجات <input type="number" class="sa-cat-limit" min="1" max="30" name="' . esc_attr( $base . '[' . $id . '][limit]' ) . '" value="' . esc_attr( $limit ) . '" style="width:65px" ' . ( $selected ? '' : 'disabled' ) . '></label>';
                 echo '<a href="' . esc_url( get_term_link( $term ) ) . '" target="_blank" rel="noopener">عرض</a></div>';
                 $draw( $id, $depth + 1 );
             }
@@ -280,32 +322,34 @@ class SA_Project_Type_Settings {
             $qbase = $base . '[' . (int) $i . ']';
             echo '<div class="sa-question-row" style="border:1px solid #e1e4e8;padding:10px;margin:8px 0;background:#fafafa">';
             echo '<input type="hidden" name="' . esc_attr( $qbase . '[key]' ) . '" value="' . esc_attr( $question['key'] ?? '' ) . '">';
-            echo '<p><label>نص السؤال<br><input class="wide" required name="' . esc_attr( $qbase . '[label]' ) . '" value="' . esc_attr( $question['label'] ?? '' ) . '"></label></p>';
+            echo '<p><label>نص السؤال<br><input class="wide" name="' . esc_attr( $qbase . '[label]' ) . '" value="' . esc_attr( $question['label'] ?? '' ) . '"></label></p>';
             echo '<p><label>نوع الإجابة <select name="' . esc_attr( $qbase . '[type]' ) . '">';
             foreach ( [ 'single'=>'اختيار واحد', 'multiple'=>'اختيار متعدد', 'yes_no'=>'نعم / لا', 'text'=>'نص قصير', 'number'=>'رقم' ] as $v => $label ) echo '<option value="' . esc_attr( $v ) . '" ' . selected( $question['type'] ?? 'single', $v, false ) . '>' . esc_html( $label ) . '</option>';
             echo '</select></label>　<label><input type="checkbox" name="' . esc_attr( $qbase . '[required]' ) . '" value="1" ' . checked( ! empty( $question['required'] ), true, false ) . '> سؤال إجباري</label></p>';
             echo '<p><label>الخيارات (كل خيار في سطر)<br><textarea class="wide" rows="3" name="' . esc_attr( $qbase . '[options]' ) . '">' . esc_textarea( implode( "\n", (array) ( $question['options'] ?? [] ) ) ) . '</textarea></label></p>';
-            echo '<fieldset style="border:1px solid #ddd;padding:10px"><legend>ربط الإجابة بالمساعد</legend><label><input type="checkbox" name="' . esc_attr( $qbase . '[save_answer]' ) . '" value="1" ' . checked( ! isset($question['save_answer']) || ! empty($question['save_answer']), true, false ) . '> حفظ الإجابة ضمن المشروع</label><br><label><input type="checkbox" name="' . esc_attr( $qbase . '[use_in_chat]' ) . '" value="1" ' . checked( ! empty($question['use_in_chat']), true, false ) . '> استخدام الإجابة في محادثة المساعد لهذا المشروع</label><p>المهارات المسموح لها باستخدام الإجابة:</p>';
+            echo '<fieldset style="border:1px solid #ddd;padding:10px"><legend>ربط الإجابة بالمساعد</legend><input type="hidden" name="' . esc_attr( $qbase . '[save_answer]' ) . '" value="0"><label><input type="checkbox" name="' . esc_attr( $qbase . '[save_answer]' ) . '" value="1" ' . checked( ! isset($question['save_answer']) || ! empty($question['save_answer']), true, false ) . '> حفظ الإجابة ضمن المشروع</label><br><label><input type="checkbox" name="' . esc_attr( $qbase . '[use_in_chat]' ) . '" value="1" ' . checked( ! empty($question['use_in_chat']), true, false ) . '> استخدام الإجابة في محادثة المساعد لهذا المشروع</label><p>المهارات المسموح لها باستخدام الإجابة:</p>';
             $skill_labels = [ 'product_advice'=>'استشارات المنتجات','product_search'=>'البحث الذكي عن المنتجات','comparison'=>'مقارنة المنتجات','cart_guidance'=>'المساعدة في السلة','project_advice'=>'استشارات المشاريع','order_status'=>'الاستفسار عن حالة الطلب','after_sales'=>'خدمة ما بعد البيع','complementary_products'=>'اكتشاف المنتجات المكملة','project_followup'=>'متابعة احتياجات المشاريع','offers_discounts'=>'العروض والخصومات' ];
             foreach ( $skill_labels as $skill => $skill_label ) echo '<label style="display:inline-block;margin:4px 10px 4px 0"><input type="checkbox" name="' . esc_attr( $qbase . '[skills][]' ) . '" value="' . esc_attr( $skill ) . '" ' . checked( in_array( $skill, (array) ( $question['skills'] ?? [] ), true ), true, false ) . '> ' . esc_html( $skill_label ) . '</label>';
             echo '</fieldset><button type="button" class="button-link-delete sa-remove-question">حذف السؤال</button></div>';
         }
         echo '</div><button type="button" class="button sa-add-question">+ إضافة سؤال</button></div>';
         ?>
-        <script>(function(){var section=document.currentScript.previousElementSibling, list=section.querySelector('.sa-question-rows'), button=section.querySelector('.sa-add-question'), base=<?php echo wp_json_encode( $base ); ?>; if(!button)return;list.querySelectorAll('.sa-remove-question').forEach(function(b){b.addEventListener('click',function(){b.closest('.sa-question-row').remove();});});button.addEventListener('click',function(){var i=Date.now(), box=document.createElement('div');box.className='sa-question-row';box.style='border:1px solid #e1e4e8;padding:10px;margin:8px 0;background:#fafafa';var name=base+'['+i+']';box.innerHTML='<input type="hidden" name="'+name+'[key]" value="q_'+i+'"><p><label>نص السؤال<br><input class="wide" required name="'+name+'[label]"></label></p><p><label>نوع الإجابة <select name="'+name+'[type]"><option value="single">اختيار واحد</option><option value="multiple">اختيار متعدد</option><option value="yes_no">نعم / لا</option><option value="text">نص قصير</option><option value="number">رقم</option></select></label>　<label><input type="checkbox" name="'+name+'[required]" value="1"> سؤال إجباري</label></p><p><label>الخيارات (كل خيار في سطر)<br><textarea class="wide" rows="3" name="'+name+'[options]"></textarea></label></p><fieldset style="border:1px solid #ddd;padding:10px"><legend>ربط الإجابة بالمساعد</legend><label><input type="checkbox" name="'+name+'[save_answer]" value="1" checked> حفظ الإجابة ضمن المشروع</label><br><label><input type="checkbox" name="'+name+'[use_in_chat]" value="1"> استخدام الإجابة في محادثة المساعد لهذا المشروع</label><p>المهارات المسموح لها باستخدام الإجابة:</p>'+['product_advice','product_search','comparison','cart_guidance','project_advice','order_status','after_sales','complementary_products','project_followup','offers_discounts'].map(function(k){var labels={product_advice:'استشارات المنتجات',product_search:'البحث الذكي عن المنتجات',comparison:'مقارنة المنتجات',cart_guidance:'المساعدة في السلة',project_advice:'استشارات المشاريع',order_status:'الاستفسار عن حالة الطلب',after_sales:'خدمة ما بعد البيع',complementary_products:'اكتشاف المنتجات المكملة',project_followup:'متابعة احتياجات المشاريع',offers_discounts:'العروض والخصومات'};return '<label style="display:inline-block;margin:4px 10px 4px 0"><input type="checkbox" name="'+name+'[skills][]" value="'+k+'"> '+labels[k]+'</label>';}).join('')+'</fieldset><button type="button" class="button-link-delete">حذف السؤال</button>';box.querySelector('button').onclick=function(){box.remove();};list.appendChild(box);});})();</script>
+        <script>(function(){var section=document.currentScript.previousElementSibling, list=section.querySelector('.sa-question-rows'), button=section.querySelector('.sa-add-question'), base=<?php echo wp_json_encode( $base ); ?>, seq=0; if(!button)return;list.querySelectorAll('.sa-remove-question').forEach(function(b){b.addEventListener('click',function(){b.closest('.sa-question-row').remove();});});button.addEventListener('click',function(){var i=Date.now()+'_'+(++seq), box=document.createElement('div');box.className='sa-question-row';box.style='border:1px solid #e1e4e8;padding:10px;margin:8px 0;background:#fafafa';var name=base+'['+i+']';box.innerHTML='<input type="hidden" name="'+name+'[key]" value="q_'+i+'"><p><label>نص السؤال<br><input class="wide" name="'+name+'[label]"></label></p><p><label>نوع الإجابة <select name="'+name+'[type]"><option value="single">اختيار واحد</option><option value="multiple">اختيار متعدد</option><option value="yes_no">نعم / لا</option><option value="text">نص قصير</option><option value="number">رقم</option></select></label>　<label><input type="checkbox" name="'+name+'[required]" value="1"> سؤال إجباري</label></p><p><label>الخيارات (كل خيار في سطر)<br><textarea class="wide" rows="3" name="'+name+'[options]"></textarea></label></p><fieldset style="border:1px solid #ddd;padding:10px"><legend>ربط الإجابة بالمساعد</legend><input type="hidden" name="'+name+'[save_answer]" value="0"><label><input type="checkbox" name="'+name+'[save_answer]" value="1" checked> حفظ الإجابة ضمن المشروع</label><br><label><input type="checkbox" name="'+name+'[use_in_chat]" value="1"> استخدام الإجابة في محادثة المساعد لهذا المشروع</label><p>المهارات المسموح لها باستخدام الإجابة:</p>'+['product_advice','product_search','comparison','cart_guidance','project_advice','order_status','after_sales','complementary_products','project_followup','offers_discounts'].map(function(k){var labels={product_advice:'استشارات المنتجات',product_search:'البحث الذكي عن المنتجات',comparison:'مقارنة المنتجات',cart_guidance:'المساعدة في السلة',project_advice:'استشارات المشاريع',order_status:'الاستفسار عن حالة الطلب',after_sales:'خدمة ما بعد البيع',complementary_products:'اكتشاف المنتجات المكملة',project_followup:'متابعة احتياجات المشاريع',offers_discounts:'العروض والخصومات'};return '<label style="display:inline-block;margin:4px 10px 4px 0"><input type="checkbox" name="'+name+'[skills][]" value="'+k+'"> '+labels[k]+'</label>';}).join('')+'</fieldset><button type="button" class="button-link-delete">حذف السؤال</button>';box.querySelector('button').onclick=function(){box.remove();};list.appendChild(box);});})();</script>
         <?php
     }
 
     private static function render_type( $key, $type ) {
         $base = self::OPTION . '[' . $key . ']';
+        $is_default = array_key_exists( $key, self::defaults() );
         ?>
         <details class="sa-project-type" <?php echo ! empty( $type['enabled'] ) ? 'open' : ''; ?>>
-        <summary><?php echo esc_html( $type['name'] ?? $key ); ?> <small style="color:#666;font-size:0.8em;font-weight:normal;margin-right:8px;">(<?php echo esc_html( $key ); ?>)</small></summary>
+        <summary><span class="sa-type-title"><?php echo esc_html( $type['name'] ?? $key ); ?></span> <small style="color:#666;font-size:0.8em;font-weight:normal;margin-right:8px;">(<?php echo esc_html( $key ); ?>)</small></summary>
         <div class="sa-inner-pad">
         <p><label><input type="checkbox" name="<?php echo esc_attr( $base ); ?>[enabled]" value="1" <?php checked( ! empty( $type['enabled'] ) ); ?>> تفعيل هذا النوع</label></p>
-        <p><label>اسم النوع الظاهر<br><input class="regular-text" required name="<?php echo esc_attr( $base ); ?>[name]" value="<?php echo esc_attr( $type['name'] ?? $key ); ?>"></label></p>
+        <p><label>اسم النوع الظاهر<br><input class="regular-text sa-type-name-input" required name="<?php echo esc_attr( $base ); ?>[name]" value="<?php echo esc_attr( $type['name'] ?? $key ); ?>"></label></p>
         <p><label>عبارات التعرف على المشروع (كل عبارة في سطر)<br><textarea class="wide" name="<?php echo esc_attr( $base ); ?>[aliases]"><?php echo esc_textarea( str_replace( '\\n', "\n", $type['aliases'] ?? '' ) ); ?></textarea></label></p>
         <p><label>ترتيب النتائج <select name="<?php echo esc_attr( $base ); ?>[sort]"><?php foreach ( [ 'rating_sales'=>'الأعلى تقييماً ثم الأكثر مبيعاً','sales'=>'الأكثر مبيعاً','newest'=>'الأحدث','relevance'=>'الأكثر صلة','price_asc'=>'السعر الأقل','price_desc'=>'السعر الأعلى' ] as $v=>$label ) : ?><option value="<?php echo esc_attr( $v ); ?>" <?php selected( $type['sort'] ?? 'rating_sales', $v ); ?>><?php echo esc_html( $label ); ?></option><?php endforeach; ?></select></label>　<label>أقل تقييم <input type="number" min="0" max="5" step="0.1" name="<?php echo esc_attr( $base ); ?>[min_rating]" value="<?php echo esc_attr( $type['min_rating'] ?? 0 ); ?>" style="width:75px"></label></p>
+        <?php if ( ! $is_default ) : ?><p><button type="button" class="button-link-delete sa-remove-type">حذف النوع</button></p><?php endif; ?>
         <h3>تحديد تصنيفات WooCommerce لهذا المشروع</h3>
         <input type="hidden" name="<?php echo esc_attr( $base ); ?>[category_rules_enabled]" value="1">
         <p class="description">يعتمد المشروع حصرياً على تصنيفات WooCommerce التي تختارها هنا. لا توجد مجموعات أو تصنيفات افتراضية قديمة.</p>

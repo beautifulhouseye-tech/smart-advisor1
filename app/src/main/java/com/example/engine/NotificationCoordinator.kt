@@ -7,6 +7,7 @@ import androidx.work.OneTimeWorkRequestBuilder
 import androidx.work.WorkManager
 import com.example.data.local.entity.GroupReplyMode
 import com.example.data.local.entity.ReplyLogEntity
+import com.example.data.local.entity.WebhookMode
 import com.example.data.preferences.AiSettingsPrefs
 import com.example.data.repository.AutoMateRepository
 import com.example.data.repository.ServerConfigRepository
@@ -162,12 +163,15 @@ class NotificationCoordinator internal constructor(
         val webhookEnabled = serverConfig?.isEnabled == true
         val saEnabled = smartAdvisorPrefs.enabled
         val aiSettings = aiSettingsPrefs?.current()
-        val smartCollaborationActive = aiSettings?.enabled == true && aiSettings.saCollaborationEnabled
+        val aiEnabled = aiSettings?.enabled == true
+        val webhookStandaloneEligible = webhookEnabled && !aiEnabled &&
+            (serverConfig?.effectiveWebhookMode() == WebhookMode.STANDALONE_FALLBACK)
+        val saStandaloneEligible = saEnabled && !aiEnabled
 
         // 1. Any path enabled? (No reservation, no token)
-        val localActive = (settings.isAutoReplyEnabled || settings.isDrivingModeEnabled || (aiSettings?.enabled == true)) &&
+        val localActive = (settings.isAutoReplyEnabled || settings.isDrivingModeEnabled || aiEnabled) &&
             (payload.packageName in settings.enabledPackages)
-        val externalEligible = (webhookEnabled || (saEnabled && !smartCollaborationActive)) &&
+        val externalEligible = (webhookStandaloneEligible || saStandaloneEligible) &&
             (payload.packageName in settings.enabledPackages || payload.replyAction != null)
 
         if (!localActive && !externalEligible) {
@@ -202,11 +206,11 @@ class NotificationCoordinator internal constructor(
 
         val groupBlocked = payload.isGroup && (
             (localActive && !settings.replyInGroups) ||
-                (!localActive && webhookEnabled && groupMode == GroupReplyMode.NEVER) ||
-                (!localActive && !webhookEnabled && saEnabled && !settings.replyInGroups)
+                (!localActive && webhookStandaloneEligible && groupMode == GroupReplyMode.NEVER) ||
+                (!localActive && !webhookStandaloneEligible && saStandaloneEligible && !settings.replyInGroups)
             )
-        val privateBlocked = !payload.isGroup && !localActive && webhookEnabled &&
-            serverConfig?.sendOnPrivate == false && !saEnabled
+        val privateBlocked = !payload.isGroup && !localActive && webhookStandaloneEligible &&
+            serverConfig?.sendOnPrivate == false && !saStandaloneEligible
 
         if (groupBlocked || privateBlocked) {
             recordSkip(payload, msgKey, convKey, MessageQueueWorker.STATUS_SKIPPED_POLICY, "تم التخطي حسب سياسة المجموعات والخاص", now)
@@ -314,8 +318,8 @@ class NotificationCoordinator internal constructor(
                     msgKey = msgKey,
                     convKey = convKey,
                     serverConfig = serverConfig,
-                    webhookEnabled = webhookEnabled,
-                    saEnabled = saEnabled && !smartCollaborationActive,
+                    webhookEnabled = webhookStandaloneEligible,
+                    saEnabled = saStandaloneEligible,
                     useAccessibilityFallback = settings.useAccessibilityFallback,
                     now = now
                 )

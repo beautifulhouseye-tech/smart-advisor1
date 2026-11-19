@@ -294,8 +294,8 @@ fun HomeScreen(
             item {
                 FeatureCard(
                     icon = Icons.Filled.Cloud,
-                    label = "الخادم",
-                    subtitle = "ربط Webhook مخصص للرد التلقائي الذكي",
+                    label = "الخادم (Webhook)",
+                    subtitle = "أداة خدمات خارجية للـ AI أو مرسل مستقل عند إيقاف AI",
                     onClick = onNavigateToServer,
                     modifier = Modifier.testTag("server_feature_card")
                 )
@@ -306,7 +306,7 @@ fun HomeScreen(
                 FeatureCard(
                     icon = Icons.Filled.SmartToy,
                     label = "Smart Advisor",
-                    subtitle = "ربط مع WooCommerce Smart Advisor للردود الذكية",
+                    subtitle = "مصدر بيانات متجرك WooCommerce كأداة للمنسّق الذكي",
                     onClick = onNavigateToSaSettings,
                     modifier = Modifier.testTag("sa_settings_feature_card")
                 )
@@ -317,7 +317,7 @@ fun HomeScreen(
                 FeatureCard(
                     icon = Icons.Filled.Psychology,
                     label = "الذكاء الاصطناعي (AI)",
-                    subtitle = "إعداد OpenAI / Gemini والردود الذكية التلقائية",
+                    subtitle = "المنسّق الوحيد للمحادثة (New API + Qwen + أدوات المتجر والويب هوك)",
                     onClick = onNavigateToAISettings,
                     modifier = Modifier.testTag("ai_settings_feature_card")
                 )

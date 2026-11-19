@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Smart Advisor – Modular Commerce Assistant
  * Description: Modular WooCommerce assistant with AutoMate AI cooperation, multi-domain durable customer memory, product knowledge, project planning, and wishlist.
- * Version: 6.5.3
+ * Version: 6.5.4
  * Author: Smart Advisor
  * Text Domain: smart-advisor
  */
@@ -15,7 +15,7 @@ if ( version_compare( PHP_VERSION, '7.4', '<' ) ) {
     return;
 }
 
-if ( ! defined( 'MBA_VERSION' ) ) define( 'MBA_VERSION', '6.5.3' );
+if ( ! defined( 'MBA_VERSION' ) ) define( 'MBA_VERSION', '6.5.4' );
 if ( ! defined( 'MBA_SANDBOX_PATH' ) ) define( 'MBA_SANDBOX_PATH', plugin_dir_path( __FILE__ ) );
 if ( ! defined( 'MBA_SANDBOX_URL' ) ) define( 'MBA_SANDBOX_URL', plugin_dir_url( __FILE__ ) );
 

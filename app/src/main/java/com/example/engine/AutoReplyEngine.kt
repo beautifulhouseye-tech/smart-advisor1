@@ -188,7 +188,7 @@ class AutoReplyEngine @Inject constructor(
                                 )
                             )
                             replyToSend = collab.replyText
-                            sourceCategoryLabel = if (collab.calledSmartAdvisor) {
+                            sourceCategoryLabel = if (collab.calledSmartAdvisor && !collab.calledWebhook) {
                                 ReplySourceCategory.SMART_ADVISOR.name
                             } else {
                                 ReplySourceCategory.AI_ENGINE.name

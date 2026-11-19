@@ -340,6 +340,7 @@ private fun ChatMessageBubble(message: TestChatMessage) {
         message.usedNewApi ||
             message.switchedToQwen ||
             message.calledSmartAdvisor ||
+            message.calledWebhook ||
             message.verifiedStoreDataUsed ||
             message.memoryLoaded ||
             message.memoryUpdated ||
@@ -416,8 +417,10 @@ private fun ChatMessageBubble(message: TestChatMessage) {
                     ) {
                         if (message.usedNewApi) TraceMiniChip("New API")
                         if (message.switchedToQwen) TraceMiniChip("Fallback: Qwen")
-                        if (message.calledSmartAdvisor) TraceMiniChip("Smart Advisor")
-                        if (message.verifiedStoreDataUsed) TraceMiniChip("بيانات مؤكدة")
+                        if (message.calledSmartAdvisor) TraceMiniChip("أداة: Smart Advisor")
+                        if (message.calledWebhook) TraceMiniChip("أداة: Webhook")
+                        if (message.toolRoundsUsed > 0) TraceMiniChip("جولات: ${message.toolRoundsUsed}")
+                        if (message.verifiedStoreDataUsed) TraceMiniChip("بيانات متجر مؤكدة")
                         if (message.memoryLoaded) TraceMiniChip("ذاكرة محملة")
                         if (message.memoryUpdated) TraceMiniChip("ذاكرة محدثة")
                         if (message.needsHuman) {
@@ -470,9 +473,35 @@ private fun ChatMessageBubble(message: TestChatMessage) {
                                         style = MaterialTheme.typography.labelSmall
                                     )
                                 }
+                                if (message.invokedTools.isNotEmpty()) {
+                                    Text(
+                                        text = "الأدوات المستدعاة: ${message.invokedTools.joinToString(" + ")}",
+                                        style = MaterialTheme.typography.labelSmall
+                                    )
+                                }
+                                if (message.saToolReason.isNotBlank()) {
+                                    Text(
+                                        text = "سبب Smart Advisor: ${message.saToolReason}",
+                                        style = MaterialTheme.typography.labelSmall
+                                    )
+                                }
                                 if (message.verifiedDataSnippet.isNotBlank()) {
                                     Text(
                                         text = "بيانات المتجر: ${message.verifiedDataSnippet.take(180)}",
+                                        style = MaterialTheme.typography.labelSmall
+                                    )
+                                }
+                                if (message.calledWebhook) {
+                                    val statusText = message.webhookStatusCode?.let { "HTTP $it" } ?: "غير متصل"
+                                    val reasonPart = message.webhookToolReason.ifBlank { "استعلام خارجي" }
+                                    Text(
+                                        text = "أداة Webhook ($statusText | مصدر خارجي): $reasonPart",
+                                        style = MaterialTheme.typography.labelSmall
+                                    )
+                                }
+                                if (message.webhookDataSnippet.isNotBlank()) {
+                                    Text(
+                                        text = "نتيجة Webhook: ${message.webhookDataSnippet.take(180)}",
                                         style = MaterialTheme.typography.labelSmall
                                     )
                                 }

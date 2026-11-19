@@ -15,9 +15,6 @@ class SA_Frontend {
 
     const MAX_HISTORY = 20;
 
-    private static $rendered_wa_register = false;
-    private static $rendered_wa_login = false;
-
     public static function init() {
         add_action( 'init', array( __CLASS__, 'register_account_endpoint' ), 5 );
         add_filter( 'query_vars', array( __CLASS__, 'register_account_query_var' ) );
@@ -436,42 +433,6 @@ class SA_Frontend {
         </style>
         <?php
     }
-
-    private static function render_wa_box( $title ) {
-        if ( is_user_logged_in() ) return;
-        $wa_number = '';
-        if ( class_exists( 'SA_WhatsApp_Settings' ) ) {
-            $cfg = SA_WhatsApp_Settings::get_config();
-            $wa_number = $cfg['whatsapp_number'] ?? '';
-        }
-        if ( empty( $wa_number ) ) $wa_number = get_option( 'sa_whatsapp_business_number', '' );
-        if ( empty( $wa_number ) ) return;
-        $wa_number = preg_replace( '/[^0-9]/', '', $wa_number );
-        ?>
-        <div id="sa-wa-login-box">
-            <h3>📱 <?php echo esc_html( $title ); ?></h3>
-            <p>أدخل رقم جوالك المسجل في المتجر، وسنرسل لك رابط دخول سري عبر واتساب.</p>
-            <form onsubmit="event.preventDefault(); var p=this.querySelector('.sa-phone').value.replace(/[^0-9]/g,''); if(p.length<9||p.length>15){alert('يرجى إدخال رقم صحيح');return;} window.open('https://wa.me/<?php echo esc_js( $wa_number ); ?>?text='+encodeURIComponent('اربط حسابي '+p), '_blank');">
-                <input type="tel" class="sa-phone" placeholder="مثال: 777123456" dir="ltr" />
-                <button type="submit">📲 إرسال رابط الدخول عبر واتساب</button>
-            </form>
-        </div>
-        <?php
-    }
-
-    public static function render_wa_box_register() {
-        if ( self::$rendered_wa_register ) return;
-        self::$rendered_wa_register = true;
-        self::render_wa_box( 'أو سجل عبر واتساب' );
-    }
-
-    public static function render_wa_box_login() {
-        if ( self::$rendered_wa_login ) return;
-        self::$rendered_wa_login = true;
-        self::render_wa_box( 'أو سجل الدخول عبر واتساب' );
-    }
-
-
 
     public static function render_wa_box_php() {
         if ( is_user_logged_in() ) return;

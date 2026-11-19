@@ -53,6 +53,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.MenuAnchorType
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
@@ -87,6 +88,7 @@ import com.example.data.local.entity.FieldType
 import com.example.data.local.entity.GroupReplyMode
 import com.example.data.local.entity.HeaderItem
 import com.example.data.local.entity.RequestField
+import com.example.data.local.entity.WebhookMode
 import com.example.ui.viewmodel.ServerViewModel
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -224,11 +226,11 @@ fun ServerScreen(
                                     )
                                     Column {
                                         Text(
-                                            text = "تفعيل الرد عبر الخادم",
+                                            text = "تفعيل خادم الويب هوك (Webhook)",
                                             style = MaterialTheme.typography.titleMedium
                                         )
                                         Text(
-                                            text = "إرسال الرسائل إلى خادمك الخارجي واستخراج الرد",
+                                            text = "منفذ للخدمات الخارجية (CRM / ERP / الشحنات) — يعمل كأداة بيد AI أو كمرسل مستقل عند إيقاف AI.",
                                             style = MaterialTheme.typography.bodyMedium,
                                             color = MaterialTheme.colorScheme.onSurfaceVariant
                                         )
@@ -240,6 +242,51 @@ fun ServerScreen(
                                     modifier = Modifier.testTag("server_enabled_switch")
                                 )
                             }
+
+                            val currentWebhookMode = remember(config.webhookMode) {
+                                config.effectiveWebhookMode()
+                            }
+                            SimpleDropdownSelector(
+                                label = "وضع تشغيل Webhook",
+                                selected = currentWebhookMode.name,
+                                options = WebhookMode.entries.map { it.name },
+                                optionLabel = { webhookModeLabel(WebhookMode.valueOf(it)) },
+                                onSelect = { selected ->
+                                    viewModel.updateWebhookMode(WebhookMode.valueOf(selected))
+                                },
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .testTag("server_webhook_mode_dropdown")
+                            )
+
+                            Surface(
+                                color = MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.4f),
+                                shape = RoundedCornerShape(10.dp),
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                Text(
+                                    text = if (currentWebhookMode == WebhookMode.AI_TOOL) {
+                                        "وضع أداة AI: يستدعي الذكاء الاصطناعي الخادم عند الحاجة فقط، ولا يُسمح للخادم بإرسال رد مستقل للعميل."
+                                    } else {
+                                        "الوضع المستقل: يعمل فقط عندما يكون منسّق AI متوقفاً؛ وعند تفعيل AI يتم تعطيل الإرسال المستقل تلقائياً منعاً للتضارب."
+                                    },
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSecondaryContainer,
+                                    modifier = Modifier.padding(10.dp)
+                                )
+                            }
+
+                            OutlinedTextField(
+                                value = config.toolDescription,
+                                onValueChange = viewModel::updateToolDescription,
+                                label = { Text("وصف الأداة للذكاء الاصطناعي (متى يستدعيها؟)") },
+                                placeholder = { Text("مثال: التحقق من حالة الشحنات والفواتير من نظام CRM") },
+                                singleLine = false,
+                                minLines = 2,
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .testTag("server_tool_description_input")
+                            )
 
                             OutlinedTextField(
                                 value = config.url,
@@ -487,33 +534,55 @@ fun ServerScreen(
                     }
                 }
 
-                // Test Request + Result Card
+                // Test Request + Tool Preview + Result Card
                 item {
                     Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                        Button(
-                            onClick = viewModel::testRequest,
-                            enabled = !isTesting,
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .minimumInteractiveComponentSize()
-                                .testTag("test_webhook_button")
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(10.dp)
                         ) {
-                            if (isTesting) {
-                                CircularProgressIndicator(
-                                    modifier = Modifier.size(18.dp),
-                                    strokeWidth = 2.dp,
-                                    color = MaterialTheme.colorScheme.onPrimary
-                                )
-                                Spacer(modifier = Modifier.width(8.dp))
-                                Text("جارٍ الإرسال...")
-                            } else {
+                            Button(
+                                onClick = viewModel::testRequest,
+                                enabled = !isTesting,
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .minimumInteractiveComponentSize()
+                                    .testTag("test_webhook_button")
+                            ) {
+                                if (isTesting) {
+                                    CircularProgressIndicator(
+                                        modifier = Modifier.size(18.dp),
+                                        strokeWidth = 2.dp,
+                                        color = MaterialTheme.colorScheme.onPrimary
+                                    )
+                                    Spacer(modifier = Modifier.width(6.dp))
+                                    Text("جارٍ الإرسال...")
+                                } else {
+                                    Icon(
+                                        imageVector = Icons.AutoMirrored.Filled.Send,
+                                        contentDescription = "اختبار الاتصال",
+                                        modifier = Modifier.size(18.dp)
+                                    )
+                                    Spacer(modifier = Modifier.width(6.dp))
+                                    Text("اختبار الاتصال")
+                                }
+                            }
+
+                            OutlinedButton(
+                                onClick = { viewModel.testAsAiTool() },
+                                enabled = !isTesting,
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .minimumInteractiveComponentSize()
+                                    .testTag("test_webhook_tool_button")
+                            ) {
                                 Icon(
-                                    imageVector = Icons.AutoMirrored.Filled.Send,
-                                    contentDescription = "إرسال طلب اختبار",
+                                    imageVector = Icons.Filled.Code,
+                                    contentDescription = "اختبار نتيجة الأداة",
                                     modifier = Modifier.size(18.dp)
                                 )
-                                Spacer(modifier = Modifier.width(8.dp))
-                                Text("إرسال طلب اختبار")
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text("اختبار نتيجة الأداة")
                             }
                         }
 
@@ -702,6 +771,7 @@ private fun VariableHelpCard() {
     val variables = remember {
         listOf(
             "{{message}}" to "نص الرسالة",
+            "{{ai_query}}" to "استعلام AI للأداة",
             "{{sender}}" to "المرسل",
             "{{sender_name}}" to "اسم المرسل",
             "{{phone}}" to "رقم الهاتف",
@@ -901,7 +971,11 @@ private fun TestResultCard(result: ServerViewModel.TestResult) {
                         tint = contentTint
                     )
                     Text(
-                        text = if (result.success) "نجح الاختبار" else "فشل الطلب",
+                        text = if (result.success) {
+                            if (result.isToolPreview) "نجحت معاينة أداة AI" else "نجح الاختبار"
+                        } else {
+                            "فشل الطلب"
+                        },
                         style = MaterialTheme.typography.titleMedium,
                         color = contentTint
                     )
@@ -957,15 +1031,14 @@ private fun HowItWorksCard() {
                     tint = MaterialTheme.colorScheme.primary
                 )
                 Text(
-                    text = "كيف يعمل خادم الويب هوك؟",
+                    text = "دور خادم Webhook في المنظومة الموحدة",
                     style = MaterialTheme.typography.titleMedium
                 )
             }
             Text(
-                text = "1. عند وصول رسالة جديدة، يتم أولاً فحص القواعد المحلية.\n" +
-                    "2. إذا لم تُعالج محلياً، يتحقق النظام من عدم تكرار الإشعار خلال 24 ساعة ومن حد المعدل (10 رسائل/دقيقة).\n" +
-                    "3. تُستبدل المتغيرات ويُبنى الطلب مع حل الترويسات السرية بأمان من SecretVault.\n" +
-                    "4. يُستخرج الرد تلقائياً من الاستجابة عبر المسار المحدد ويُرسل عبر DirectReply أو Accessibility.",
+                text = "1. في وضع أداة AI (الموصى به): يستدعي الذكاء الاصطناعي الخادم عند حاجته لبيانات خارجية (CRM/ERP/شحنات)، وتصل النتيجة منقحة ومحدودة للـ AI لصياغة رد واحد متماسك.\n" +
+                    "2. في الوضع المستقل: يعمل Webhook كمرسل بديل فقط عندما يكون منسّق AI متوقفاً، ويُمنع الإرسال المزدوج أثناء تشغيل AI.\n" +
+                    "3. تحفظ الترويسات السرية بأمان داخل SecretVault مع إرسال Idempotency-Key.",
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
@@ -1017,6 +1090,11 @@ private fun SimpleDropdownSelector(
             }
         }
     }
+}
+
+private fun webhookModeLabel(mode: WebhookMode): String = when (mode) {
+    WebhookMode.AI_TOOL -> "أداة للذكاء الاصطناعي (AI Tool Mode)"
+    WebhookMode.STANDALONE_FALLBACK -> "مرسل مستقل عند إيقاف AI (Standalone)"
 }
 
 private fun groupModeLabel(mode: GroupReplyMode): String = when (mode) {

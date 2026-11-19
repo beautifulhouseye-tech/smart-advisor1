@@ -48,7 +48,8 @@ object AppModule {
                 AutoMateDatabase.MIGRATION_4_5,
                 AutoMateDatabase.MIGRATION_5_6,
                 AutoMateDatabase.MIGRATION_6_7,
-                AutoMateDatabase.MIGRATION_7_8
+                AutoMateDatabase.MIGRATION_7_8,
+                AutoMateDatabase.MIGRATION_8_9
             )
             .build()
     }

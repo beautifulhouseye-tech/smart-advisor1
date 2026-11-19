@@ -58,6 +58,10 @@ class SA_Customer_Service_Settings {
         $valid_tones = [ 'friendly_professional', 'formal', 'casual', 'concise' ];
         $valid_verbosity = [ 'short', 'balanced', 'detailed' ];
         $valid_languages = [ 'auto', 'ar', 'en' ];
+        $raw_map_url = $in['store_map_url'] ?? '';
+        $map_url     = class_exists( 'SA_Settings' )
+            ? SA_Settings::sanitize_http_url( $raw_map_url, self::OPTION )
+            : esc_url_raw( trim( (string) $raw_map_url ), [ 'http', 'https' ] );
         $clean = [
             'enabled' => isset( $in['enabled'] ) ? 1 : 0,
             'assistant_name' => sanitize_text_field( $in['assistant_name'] ?? $old['assistant_name'] ),
@@ -67,7 +71,7 @@ class SA_Customer_Service_Settings {
             'welcome_message' => sanitize_textarea_field( $in['welcome_message'] ?? '' ),
             'store_context' => sanitize_textarea_field( $in['store_context'] ?? '' ),
             'store_address' => sanitize_textarea_field( $in['store_address'] ?? '' ),
-            'store_map_url' => esc_url_raw( $in['store_map_url'] ?? '' ),
+            'store_map_url' => $map_url,
             'store_phone' => sanitize_text_field( $in['store_phone'] ?? '' ),
             'store_hours' => sanitize_text_field( $in['store_hours'] ?? '' ),
             'shipping_policy' => sanitize_textarea_field( $in['shipping_policy'] ?? '' ),
@@ -78,13 +82,26 @@ class SA_Customer_Service_Settings {
         ];
         foreach ( array_keys( self::defaults()['skills'] ) as $key ) $clean['skills'][ $key ] = isset( $in['skills'][ $key ] ) ? 1 : 0;
         foreach ( array_keys( self::defaults()['permissions'] ) as $key ) $clean['permissions'][ $key ] = isset( $in['permissions'][ $key ] ) ? 1 : 0;
+        if ( class_exists( 'SA_Customer_Service_Composer' ) && method_exists( 'SA_Customer_Service_Composer', 'reset_cache' ) ) {
+            SA_Customer_Service_Composer::reset_cache();
+        }
         update_option( self::OPTION, $clean, false );
-        wp_safe_redirect( add_query_arg( [ 'page' => 'sa-customer-service', 'updated' => '1' ], admin_url( 'admin.php' ) ) );
+        if ( class_exists( 'SA_Settings' ) ) {
+            SA_Settings::clear_option_cache( self::OPTION );
+            $persisted = SA_Settings::verify_persisted( self::OPTION, $clean );
+        } else {
+            $persisted = ( get_option( self::OPTION ) === $clean );
+        }
+        $status_arg = $persisted ? [ 'updated' => '1' ] : [ 'save_error' => '1' ];
+        wp_safe_redirect( add_query_arg( array_merge( [ 'page' => 'sa-customer-service' ], $status_arg ), admin_url( 'admin.php' ) ) );
         exit;
     }
 
-    private static function checkbox( $name, $label, $checked ) {
-        printf( '<label style="display:inline-flex;gap:8px;align-items:center;margin:5px 18px 5px 0"><input type="checkbox" name="sa_cs[%1$s]" value="1" %2$s> %3$s</label>', esc_attr( $name ), checked( $checked, 1, false ), esc_html( $label ) );
+    private static function checkbox( $name, $label, $checked, $group = '' ) {
+        $field_name = '' !== $group
+            ? 'sa_cs[' . $group . '][' . $name . ']'
+            : 'sa_cs[' . $name . ']';
+        printf( '<label style="display:inline-flex;gap:8px;align-items:center;margin:5px 18px 5px 0"><input type="checkbox" name="%1$s" value="1" %2$s> %3$s</label>', esc_attr( $field_name ), checked( $checked, 1, false ), esc_html( $label ) );
     }
 
     public static function render() {
@@ -94,7 +111,11 @@ class SA_Customer_Service_Settings {
         <div class="wrap" dir="rtl">
           <h1>🤖 مركز التحكم في خدمة العملاء بالذكاء الاصطناعي</h1>
           <p>إعدادات مستقلة لشخصية المساعد، ومعلومات المتجر، والمهارات، والصلاحيات. لا تغيّر هذه الصفحة إعدادات المشاريع أو محرك التوصيات.</p>
-          <?php if ( isset( $_GET['updated'] ) ) : ?><div class="notice notice-success is-dismissible"><p>تم حفظ إعدادات خدمة العملاء.</p></div><?php endif; ?>
+          <?php if ( isset( $_GET['save_error'] ) ) : ?>
+            <div class="notice notice-error is-dismissible"><p><strong>تعذر حفظ إعدادات خدمة العملاء في قاعدة البيانات.</strong> تحقق من اتصال قاعدة البيانات أو طبقة التخزين المؤقت.</p></div>
+          <?php elseif ( isset( $_GET['updated'] ) ) : ?>
+            <div class="notice notice-success is-dismissible"><p>تم حفظ إعدادات خدمة العملاء والتحقق من تخزينها بنجاح.</p></div>
+          <?php endif; ?>
           <form method="post" action="<?php echo esc_url( admin_url( 'admin-post.php' ) ); ?>">
             <input type="hidden" name="action" value="sa_save_customer_service"><?php wp_nonce_field( 'sa_save_customer_service' ); ?>
             <h2>1. شخصية المساعد</h2><table class="form-table"><tbody>
@@ -117,14 +138,14 @@ class SA_Customer_Service_Settings {
             <h2>3. مهارات المساعد</h2><p>هذه الخيارات تحدد المهارات المسموح للمساعد بتقديمها؛ المهارات التي تحتاج تكاملاً إضافياً لا تُفعّل وظيفياً بمجرد تحديدها.</p><div class="card" style="max-width:900px;padding:12px 20px">
               <?php
               $skill_labels = [ 'product_advice' => 'استشارات المنتجات', 'product_search' => 'البحث الذكي عن المنتجات', 'comparison' => 'مقارنة المنتجات', 'cart_guidance' => 'المساعدة في السلة', 'project_advice' => 'استشارات المشاريع', 'order_status' => 'الاستفسار عن حالة الطلب', 'after_sales' => 'خدمة ما بعد البيع', 'complementary_products' => 'اكتشاف المنتجات المكملة', 'project_followup' => 'متابعة احتياجات العميل والمشاريع', 'offers_discounts' => 'العروض والخصومات' ];
-              foreach ( $skill_labels as $key => $label ) self::checkbox( 'skills][' . $key, $label, $c['skills'][ $key ] ?? 0 );
+              foreach ( $skill_labels as $key => $label ) self::checkbox( $key, $label, $c['skills'][ $key ] ?? 0, 'skills' );
               ?>
               <p class="description">المهارات الجديدة لها وظائف REST فعلية: المنتجات المكملة عبر البيع المتقاطع/الترقية والتصنيفات المشتركة، متابعة الاحتياجات غير المكتملة للمشاريع المملوكة للعميل، والعروض المنشورة بأسعار التخفيض في WooCommerce. تتطلب واجهة العميل استدعاء نقاط API المخصصة، ولا يكفي تفعيل المربع وحده لإظهارها تلقائياً داخل المحادثة.</p>
             </div>
             <h2>4. الصلاحيات</h2><div class="card" style="max-width:900px;padding:12px 20px">
               <?php
               $permission_labels = [ 'add_to_cart' => 'السماح بتوجيه العميل لإضافة المنتجات للسلة', 'order_lookup' => 'السماح بالوصول إلى بيانات الطلب بعد التحقق من العميل', 'modify_order' => 'السماح بتعديل الطلبات', 'issue_coupon' => 'السماح بإنشاء أو إصدار كوبونات' ];
-              foreach ( $permission_labels as $key => $label ) self::checkbox( 'permissions][' . $key, $label, $c['permissions'][ $key ] ?? 0 );
+              foreach ( $permission_labels as $key => $label ) self::checkbox( $key, $label, $c['permissions'][ $key ] ?? 0, 'permissions' );
               ?>
               <p class="description">العمليات الحساسة مثل تعديل الطلب وإصدار كوبون تظل غير متاحة حتى بناء تكامل آمن ومراجعة صلاحياته.</p>
             </div>

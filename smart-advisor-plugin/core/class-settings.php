@@ -4,11 +4,16 @@ if ( ! defined( 'ABSPATH' ) ) exit;
 class SA_Settings {
     const OPTION = 'sa_config';
 
+    private static $pending_writes = [];
+
     public static function init() {
         self::maybe_migrate_legacy_settings();
         add_action( 'admin_menu', [ __CLASS__, 'add_menu' ] );
         add_action( 'admin_init', [ __CLASS__, 'register_settings' ] );
         add_action( 'wp_ajax_sa_test_provider', [ __CLASS__, 'ajax_test_provider' ] );
+        add_action( 'updated_option', [ __CLASS__, 'on_option_saved' ] );
+        add_action( 'added_option', [ __CLASS__, 'on_option_saved' ] );
+        add_filter( 'pre_set_transient_settings_errors', [ __CLASS__, 'verify_settings_errors_transient' ] );
     }
 
     /** نقل إعدادات الإصدارات السابقة دون حذف الخيار القديم. */
@@ -55,22 +60,22 @@ class SA_Settings {
         $clear_api     = ! empty( $input['clear_api_key'] );
         $clear_gateway = ! empty( $input['clear_gateway_key'] );
 
-        $gateway_url = isset( $input['gateway_url'] ) ? esc_url_raw( trim( (string) $input['gateway_url'] ), [ 'http', 'https' ] ) : ( $old['gateway_url'] ?? '' );
-        $ollama_url  = isset( $input['ollama_url'] )  ? esc_url_raw( trim( (string) $input['ollama_url'] ),  [ 'http', 'https' ] ) : ( $old['ollama_url'] ?? 'http://172.18.0.8:11434/v1/chat/completions' );
+        $gateway_url = isset( $input['gateway_url'] ) ? self::sanitize_http_url( $input['gateway_url'], self::OPTION ) : ( $old['gateway_url'] ?? '' );
+        $ollama_url  = isset( $input['ollama_url'] )  ? self::sanitize_http_url( $input['ollama_url'], self::OPTION )  : ( $old['ollama_url'] ?? 'http://172.18.0.8:11434/v1/chat/completions' );
         $raw_ids = sanitize_text_field( (string) ( $input['display_page_ids'] ?? ( $old['display_page_ids'] ?? '' ) ) );
         $ids = array_filter( array_map( 'absint', preg_split( '/[\s,]+/', $raw_ids ) ) );
         $mode = sanitize_key( $input['display_mode'] ?? ( $old['display_mode'] ?? 'all' ) );
         $position = sanitize_key( $input['position'] ?? ( $old['position'] ?? 'bottom-right' ) );
         $symbol = sanitize_text_field( $input['icon_symbol'] ?? ( $old['icon_symbol'] ?? '💬' ) );
 
-        return [
+        $result = [
             'provider'         => in_array( sanitize_key( $input['provider'] ?? ( $old['provider'] ?? 'gateway' ) ), [ 'gateway', 'gemini', 'ollama' ], true ) ? sanitize_key( $input['provider'] ?? ( $old['provider'] ?? 'gateway' ) ) : 'gateway',
-            'api_key'          => $clear_api ? '' : ( ! empty( $input['api_key'] ) ? sanitize_text_field( $input['api_key'] ) : ( $old['api_key'] ?? '' ) ),
+            'api_key'          => $clear_api ? '' : ( ! empty( $input['api_key'] ) ? trim( sanitize_text_field( $input['api_key'] ) ) : ( $old['api_key'] ?? '' ) ),
             'gateway_url'      => $gateway_url,
-            'gateway_key'      => $clear_gateway ? '' : ( ! empty( $input['gateway_key'] ) ? sanitize_text_field( $input['gateway_key'] ) : ( $old['gateway_key'] ?? '' ) ),
-            'model'            => sanitize_text_field( $input['model'] ?? ( $old['model'] ?? 'smart-advisor' ) ),
+            'gateway_key'      => $clear_gateway ? '' : ( ! empty( $input['gateway_key'] ) ? trim( sanitize_text_field( $input['gateway_key'] ) ) : ( $old['gateway_key'] ?? '' ) ),
+            'model'            => trim( sanitize_text_field( $input['model'] ?? ( $old['model'] ?? 'smart-advisor' ) ) ),
             'ollama_url'       => $ollama_url,
-            'ollama_model'     => sanitize_text_field( $input['ollama_model'] ?? ( $old['ollama_model'] ?? 'qwen2.5:1.5b' ) ),
+            'ollama_model'     => trim( sanitize_text_field( $input['ollama_model'] ?? ( $old['ollama_model'] ?? 'qwen2.5:1.5b' ) ) ),
             'icon_color'       => sanitize_hex_color( $input['icon_color'] ?? ( $old['icon_color'] ?? '#e91e63' ) ) ?: '#e91e63',
             'icon_symbol'      => ( function_exists( 'mb_substr' ) ? mb_substr( trim( $symbol ), 0, 4 ) : substr( trim( $symbol ), 0, 16 ) ) ?: '💬',
             'position'         => in_array( $position, [ 'bottom-right', 'bottom-left' ], true ) ? $position : 'bottom-right',
@@ -80,6 +85,135 @@ class SA_Settings {
             'display_to_guests' => isset( $input['display_to_guests'] ) ? ( '1' === (string) $input['display_to_guests'] ) : ( array_key_exists( 'display_to_guests', $old ) ? (bool) $old['display_to_guests'] : true ),
             'display_to_logged_in' => isset( $input['display_to_logged_in'] ) ? ( '1' === (string) $input['display_to_logged_in'] ) : ( array_key_exists( 'display_to_logged_in', $old ) ? (bool) $old['display_to_logged_in'] : true ),
         ];
+        self::record_pending_write( self::OPTION, $result );
+        return $result;
+    }
+
+    public static function sanitize_http_url( $raw_url, $setting_key = self::OPTION ) {
+        $raw = trim( (string) $raw_url );
+        if ( '' === $raw ) {
+            return '';
+        }
+        if ( false === strpos( $raw, '://' ) && preg_match( '/^[a-z0-9.\-:]+(\/.*)?$/i', $raw ) ) {
+            $is_local = (bool) preg_match( '/^(localhost|127\.|10\.|192\.168\.|172\.(1[6-9]|2[0-9]|3[01])\.)/i', $raw );
+            $raw = ( $is_local ? 'http://' : 'https://' ) . $raw;
+        }
+        $clean = esc_url_raw( $raw, [ 'http', 'https' ] );
+        if ( '' === $clean && function_exists( 'add_settings_error' ) ) {
+            add_settings_error( $setting_key, 'invalid_url', 'تم تجاهل رابط غير صالح؛ يُسمح فقط بروابط http:// أو https://.', 'error' );
+        }
+        return $clean;
+    }
+
+    public static function record_pending_write( $option, $value ) {
+        self::$pending_writes[ (string) $option ] = $value;
+    }
+
+    public static function clear_option_cache( $option ) {
+        if ( function_exists( 'wp_cache_delete' ) ) {
+            wp_cache_delete( $option, 'options' );
+            wp_cache_delete( 'alloptions', 'options' );
+        }
+    }
+
+    public static function on_option_saved( $option ) {
+        $watched = [
+            self::OPTION,
+            'sa_whatsapp_config',
+            'sa_project_type_configs',
+            'sa_customer_service_config',
+            'sa_whatsapp_business_number',
+            'sa_whatsapp_api_key_hash',
+        ];
+        if ( in_array( $option, $watched, true ) ) {
+            self::clear_option_cache( $option );
+        }
+    }
+
+    public static function read_option_direct( $option, $default = null ) {
+        global $wpdb;
+        if ( isset( $wpdb ) && is_object( $wpdb ) && ! empty( $wpdb->options ) && method_exists( $wpdb, 'get_var' ) && method_exists( $wpdb, 'prepare' ) ) {
+            $raw = $wpdb->get_var( $wpdb->prepare( "SELECT option_value FROM {$wpdb->options} WHERE option_name = %s LIMIT 1", $option ) );
+            if ( null !== $raw ) {
+                return function_exists( 'maybe_unserialize' ) ? maybe_unserialize( $raw ) : $raw;
+            }
+            if ( class_exists( 'wpdb', false ) && $wpdb instanceof wpdb ) {
+                return $default;
+            }
+        }
+        self::clear_option_cache( $option );
+        return get_option( $option, $default );
+    }
+
+    private static function canonicalize_value( $value ) {
+        if ( ! is_array( $value ) ) {
+            return $value;
+        }
+        $count = count( $value );
+        $is_list = ( 0 === $count ) || ( array_keys( $value ) === range( 0, $count - 1 ) );
+        if ( ! $is_list ) {
+            ksort( $value );
+        }
+        foreach ( $value as $k => $v ) {
+            $value[ $k ] = self::canonicalize_value( $v );
+        }
+        return $value;
+    }
+
+    public static function verify_persisted( $option, $expected ) {
+        global $wpdb;
+        if ( isset( $wpdb ) && is_object( $wpdb ) && ! empty( $wpdb->last_error ) ) {
+            return false;
+        }
+        $actual = self::read_option_direct( $option, '__sa_missing__' );
+        if ( '__sa_missing__' === $actual ) {
+            return false;
+        }
+        return self::canonicalize_value( $actual ) === self::canonicalize_value( $expected );
+    }
+
+    public static function verify_settings_errors_transient( $errors ) {
+        if ( empty( self::$pending_writes ) || ! is_array( $errors ) ) {
+            return $errors;
+        }
+        $failed_options = [];
+        foreach ( self::$pending_writes as $option => $expected ) {
+            self::clear_option_cache( $option );
+            if ( ! self::verify_persisted( $option, $expected ) ) {
+                $failed_options[] = $option;
+            }
+        }
+        self::$pending_writes = [];
+        if ( ! empty( $failed_options ) ) {
+            $filtered = [];
+            foreach ( $errors as $err ) {
+                if ( is_array( $err ) && ( $err['code'] ?? '' ) === 'settings_updated' ) {
+                    continue;
+                }
+                $filtered[] = $err;
+            }
+            $filtered[] = [
+                'setting' => $failed_options[0],
+                'code'    => 'sa_persistence_failed',
+                'message' => 'تعذر التحقق من حفظ الإعدادات فعلياً في قاعدة البيانات (' . esc_html( implode( ', ', $failed_options ) ) . '). قد يوجد خطأ في قاعدة البيانات أو طبقة التخزين المؤقت.',
+                'type'    => 'error',
+            ];
+            return $filtered;
+        }
+        return $errors;
+    }
+
+    public static function render_save_notices( $success_message = '✅ تم حفظ الإعدادات والتحقق من تخزينها بنجاح' ) {
+        $notices_html = '';
+        if ( function_exists( 'settings_errors' ) ) {
+            ob_start();
+            settings_errors();
+            $notices_html = (string) ob_get_clean();
+            echo $notices_html;
+        }
+        if ( isset( $_GET['settings-updated'] ) && false === strpos( $notices_html, 'notice-error' ) && false === strpos( $notices_html, 'settings_updated' ) ) {
+            echo '<div class="notice notice-success is-dismissible"><p><strong>' . esc_html( $success_message ) . '</strong></p></div>';
+        }
     }
 
     public static function get( $key, $default = '' ) {
@@ -134,7 +268,7 @@ class SA_Settings {
                 $url = $c['gateway_url'] ?? '';
                 if ( empty( $url ) ) wp_send_json_error( [ 'message' => 'Gateway URL فارغ' ] );
 
-                $key = $c['gateway_key'] ?? '';
+                $key = self::get( 'gateway_key', '' );
                 $headers = [ 'Content-Type' => 'application/json' ];
                 if ( $key ) $headers['Authorization'] = 'Bearer ' . $key;
 
@@ -200,7 +334,7 @@ class SA_Settings {
                 break;
 
             case 'gemini':
-                $key = $c['api_key'] ?? '';
+                $key = self::get( 'api_key', '' );
                 if ( empty( $key ) ) wp_send_json_error( [ 'message' => 'Gemini API Key فارغ' ] );
 
                 $response = wp_remote_get(
@@ -236,12 +370,12 @@ class SA_Settings {
         $gateway_url = $c['gateway_url'] ?? '';
         $version = defined( 'MBA_VERSION' ) ? MBA_VERSION : 'dev';
         $is_local_gateway = ( $gateway_url !== '' && preg_match( '#^https?://(172\.(1[6-9]|2[0-9]|3[01])\.|192\.168\.|10\.|127\.)#i', $gateway_url ) );
+        $has_const_gemini  = defined( 'SA_GEMINI_API_KEY' ) && SA_GEMINI_API_KEY;
+        $has_const_gateway = defined( 'SA_GATEWAY_KEY' ) && SA_GATEWAY_KEY;
         ?>
         <div class="wrap" dir="rtl">
             <h1>⚙️ إعدادات Smart Advisor (v<?php echo esc_html( $version ); ?>)</h1>
-            <?php if ( isset( $_GET['settings-updated'] ) ) : ?>
-                <div class="notice notice-success is-dismissible"><p><strong>✅ تم حفظ الإعدادات بنجاح</strong></p></div>
-            <?php endif; ?>
+            <?php self::render_save_notices(); ?>
 
             <?php if ( $is_local_gateway ) : ?>
                 <div class="notice notice-warning is-dismissible">
@@ -291,6 +425,9 @@ class SA_Settings {
                             <?php endif; ?>
                             <button type="button" class="button sa-test-btn" data-provider="gemini">اختبار</button>
                             <span class="sa-test-result" id="sa-test-gemini" style="margin-right:10px;font-weight:bold"></span>
+                            <?php if ( $has_const_gemini ) : ?>
+                                <p class="description">ℹ️ يُستخدم حالياً المفتاح المعرّف برمجياً عبر <code>SA_GEMINI_API_KEY</code>.</p>
+                            <?php endif; ?>
                         </td>
                     </tr>
 
@@ -313,7 +450,9 @@ class SA_Settings {
                                     مسح المفتاح الحالي
                                 </label>
                             <?php endif; ?>
-                            <?php if ( ! empty( $c['gateway_key'] ) ) : ?>
+                            <?php if ( $has_const_gateway ) : ?>
+                                <p class="description">ℹ️ يُستخدم حالياً المفتاح المعرّف برمجياً عبر <code>SA_GATEWAY_KEY</code>.</p>
+                            <?php elseif ( ! empty( $c['gateway_key'] ) ) : ?>
                                 <p class="description">✅ المفتاح محفوظ. اتركه فارغاً للإبقاء عليه.</p>
                             <?php endif; ?>
                         </td>
@@ -322,8 +461,8 @@ class SA_Settings {
                     <tr>
                         <th><label for="sa_model">Model (Gateway)</label></th>
                         <td>
-                            <input id="sa_model" type="text" name="<?php echo esc_attr( self::OPTION ); ?>[model]" value="<?php echo esc_attr( $c['model'] ?? 'smart-advisor' ); ?>" class="regular-text" dir="ltr" pattern="[a-zA-Z0-9._\-]+" title="حروف إنجليزية وأرقام ونقاط وشرطات فقط">
-                            <p class="description">مثال: <code>smart-advisor</code> أو <code>gemini-2.5-flash</code></p>
+                            <input id="sa_model" type="text" name="<?php echo esc_attr( self::OPTION ); ?>[model]" value="<?php echo esc_attr( $c['model'] ?? 'smart-advisor' ); ?>" class="regular-text" dir="ltr" pattern="[a-zA-Z0-9._\-/:@]+" title="حروف إنجليزية وأرقام والرموز . _ - / : @">
+                            <p class="description">مثال: <code>smart-advisor</code> أو <code>gemini-2.5-flash</code> أو <code>qwen/qwen2.5-7b</code></p>
                         </td>
                     </tr>
 

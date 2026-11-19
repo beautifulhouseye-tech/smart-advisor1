@@ -9,6 +9,7 @@ import com.example.data.local.dao.DedupKeyDao
 import com.example.data.local.dao.ReplyLogDao
 import com.example.data.local.entity.DedupKeyEntity
 import com.example.data.local.entity.ReplyLogEntity
+import com.example.data.local.entity.WebhookMode
 import com.example.data.repository.ServerConfigRepository
 import com.example.data.security.SmartAdvisorPrefs
 import com.example.engine.IdempotencyGuard
@@ -249,7 +250,10 @@ class MessageQueueWorker @AssistedInject constructor(
                 var conflictDetected = false
                 var errorMessage: String? = null
 
-                if (serverConfig != null && serverConfig.isEnabled) {
+                if (serverConfig != null &&
+                    serverConfig.isEnabled &&
+                    serverConfig.effectiveWebhookMode() == WebhookMode.STANDALONE_FALLBACK
+                ) {
                     val res = webhookClient.send(
                         config = serverConfig,
                         msg = incoming,

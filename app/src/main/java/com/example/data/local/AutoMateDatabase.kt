@@ -39,7 +39,7 @@ import com.example.data.local.entity.ServerConfigEntity
         MemoryOutboxEntity::class,
         ReplyTemplateEntity::class
     ],
-    version = 8,
+    version = 9,
     exportSchema = true
 )
 @TypeConverters(AutoMateTypeConverters::class, ServerConverters::class)
@@ -229,6 +229,20 @@ abstract class AutoMateDatabase : RoomDatabase() {
                 )
                 db.execSQL(
                     "CREATE INDEX IF NOT EXISTS `index_reply_templates_updatedAt` ON `reply_templates` (`updatedAt`)"
+                )
+            }
+        }
+
+        val MIGRATION_8_9 = object : Migration(8, 9) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    "ALTER TABLE `server_config` ADD COLUMN `webhookMode` TEXT NOT NULL DEFAULT 'STANDALONE_FALLBACK'"
+                )
+                db.execSQL(
+                    "ALTER TABLE `server_config` ADD COLUMN `toolDescription` TEXT NOT NULL DEFAULT ''"
+                )
+                db.execSQL(
+                    "ALTER TABLE `server_config` ADD COLUMN `toolMaxResponseChars` INTEGER NOT NULL DEFAULT 2000"
                 )
             }
         }

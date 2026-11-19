@@ -22,7 +22,8 @@ data class IncomingMessage(
     val groupName: String,
     val isGroup: Boolean,
     val notificationId: String,
-    val timestamp: Long = System.currentTimeMillis()
+    val timestamp: Long = System.currentTimeMillis(),
+    val aiQuery: String = ""
 )
 
 object VariableEngine {
@@ -35,8 +36,10 @@ object VariableEngine {
     fun resolveTemplate(template: String, msg: IncomingMessage): String {
         if (template.isEmpty()) return template
         var resolved = template
+        val effectiveAiQuery = msg.aiQuery.ifBlank { msg.message }
         val replacements = mapOf(
             "{{message}}" to msg.message,
+            "{{ai_query}}" to effectiveAiQuery,
             "{{sender}}" to msg.sender,
             "{{phone}}" to msg.phone,
             "{{app}}" to msg.app,

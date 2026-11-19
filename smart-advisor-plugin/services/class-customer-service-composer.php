@@ -5,6 +5,10 @@ if ( ! defined( 'ABSPATH' ) ) exit;
 class SA_Customer_Service_Composer {
     private static $facts = null;
 
+    public static function reset_cache() {
+        self::$facts = null;
+    }
+
     public static function is_service_turn( $message, $analysis = [] ) {
         $m = self::normalize( $message );
         if ( $m === '' ) return false;

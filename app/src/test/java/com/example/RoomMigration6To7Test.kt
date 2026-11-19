@@ -108,7 +108,11 @@ class RoomMigration6To7Test {
             AutoMateDatabase::class.java,
             dbFile.absolutePath
         )
-            .addMigrations(AutoMateDatabase.MIGRATION_6_7, AutoMateDatabase.MIGRATION_7_8)
+            .addMigrations(
+                AutoMateDatabase.MIGRATION_6_7,
+                AutoMateDatabase.MIGRATION_7_8,
+                AutoMateDatabase.MIGRATION_8_9
+            )
             .allowMainThreadQueries()
             .build()
 

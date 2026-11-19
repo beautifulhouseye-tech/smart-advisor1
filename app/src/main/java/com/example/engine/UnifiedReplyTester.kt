@@ -2,6 +2,7 @@ package com.example.engine
 
 import com.example.data.local.entity.GroupReplyMode
 import com.example.data.local.entity.ReplyRuleEntity
+import com.example.data.local.entity.WebhookMode
 import com.example.data.preferences.AiSettingsPrefs
 import com.example.data.repository.AutoMateRepository
 import com.example.data.repository.ServerConfigRepository
@@ -41,7 +42,14 @@ data class UnifiedTestResult(
     val activeEngineLabel: String = "",
     val switchedToQwen: Boolean = false,
     val calledSmartAdvisor: Boolean = false,
+    val calledWebhook: Boolean = false,
     val detectedIntent: String = "",
+    val saToolReason: String = "",
+    val webhookToolReason: String = "",
+    val webhookDataSnippet: String = "",
+    val webhookStatusCode: Int? = null,
+    val invokedTools: List<String> = emptyList(),
+    val toolRoundsUsed: Int = 0,
     val verifiedStoreDataUsed: Boolean = false,
     val verifiedDataSnippet: String = "",
     val memoryLoaded: Boolean = false,
@@ -159,6 +167,10 @@ class UnifiedReplyTester internal constructor(
             conversationKey
         }
 
+        val webhookStandaloneEligible = webhookEnabled && !aiSettings.enabled &&
+            (serverConfig?.effectiveWebhookMode() == WebhookMode.STANDALONE_FALLBACK)
+        val saStandaloneEligible = saEnabled && !aiSettings.enabled
+
         if (isGroup) {
             evaluated += "سياسة المجموعات"
             val groupMode = serverConfig?.let {
@@ -166,8 +178,8 @@ class UnifiedReplyTester internal constructor(
             } ?: GroupReplyMode.KEYWORD_ONLY
             val localEnabled = settings.isAutoReplyEnabled || settings.isDrivingModeEnabled || aiSettings.enabled
             val groupBlocked = (localEnabled && !settings.replyInGroups) ||
-                (!localEnabled && webhookEnabled && groupMode == GroupReplyMode.NEVER) ||
-                (!localEnabled && !webhookEnabled && saEnabled && !settings.replyInGroups)
+                (!localEnabled && webhookStandaloneEligible && groupMode == GroupReplyMode.NEVER) ||
+                (!localEnabled && !webhookStandaloneEligible && saStandaloneEligible && !settings.replyInGroups)
             if (groupBlocked) {
                 return UnifiedTestResult(
                     matched = false,
@@ -256,6 +268,9 @@ class UnifiedReplyTester internal constructor(
                 if (collab.calledSmartAdvisor) {
                     evaluated += "Smart Advisor 6.5.0"
                 }
+                if (collab.calledWebhook) {
+                    evaluated += "أداة Webhook"
+                }
 
                 if (!collab.replyText.isNullOrBlank()) {
                     conversationMemoryManager?.commitAssistantTurnImmediately(
@@ -264,15 +279,20 @@ class UnifiedReplyTester internal constructor(
                         contextWindowPairs = aiSettings.contextWindowPairs,
                         isSandbox = true
                     )
-                    val category = if (collab.calledSmartAdvisor) {
+                    val category = if (collab.calledSmartAdvisor && !collab.calledWebhook) {
                         ReplySourceCategory.SMART_ADVISOR
                     } else {
                         ReplySourceCategory.AI_ENGINE
                     }
-                    val label = if (collab.calledSmartAdvisor) {
-                        "${collab.activeEngine} + Smart Advisor"
-                    } else {
-                        collab.activeEngine.ifBlank { "الذكاء الاصطناعي" }
+                    val label = when {
+                        collab.calledSmartAdvisor && collab.calledWebhook ->
+                            "${collab.activeEngine} + Smart Advisor + Webhook"
+                        collab.calledSmartAdvisor ->
+                            "${collab.activeEngine} + Smart Advisor"
+                        collab.calledWebhook ->
+                            "${collab.activeEngine} + Webhook"
+                        else ->
+                            collab.activeEngine.ifBlank { "الذكاء الاصطناعي" }
                     }
                     return UnifiedTestResult(
                         matched = true,
@@ -286,7 +306,14 @@ class UnifiedReplyTester internal constructor(
                         activeEngineLabel = collab.activeEngine,
                         switchedToQwen = collab.switchedToQwen,
                         calledSmartAdvisor = collab.calledSmartAdvisor,
+                        calledWebhook = collab.calledWebhook,
                         detectedIntent = collab.saIntent,
+                        saToolReason = collab.saToolReason,
+                        webhookToolReason = collab.webhookToolReason,
+                        webhookDataSnippet = collab.webhookDataSnippet,
+                        webhookStatusCode = collab.webhookStatusCode,
+                        invokedTools = collab.invokedTools,
+                        toolRoundsUsed = collab.toolRoundsUsed,
                         verifiedStoreDataUsed = collab.verifiedStoreDataUsed,
                         verifiedDataSnippet = collab.verifiedDataSnippet,
                         memoryLoaded = collab.memoryLoaded,
@@ -360,8 +387,8 @@ class UnifiedReplyTester internal constructor(
             )
         }
 
-        // 6. External Webhook / Standalone Legacy Smart Advisor (only when Smart Collaboration wasn't active)
-        if (webhookEnabled && serverConfig != null) {
+        // 6. Standalone Webhook / Standalone Legacy Smart Advisor (STRICTLY disabled when AI Orchestrator is active!)
+        if (webhookStandaloneEligible && serverConfig != null) {
             evaluated += "خادم Webhook"
             val msg = buildIncomingMessage(cleanMessage, senderName, isGroup, phone, startMs)
             val result = webhookClient.send(
@@ -380,7 +407,7 @@ class UnifiedReplyTester internal constructor(
             )
         }
 
-        if (saEnabled && !smartCollabActive) {
+        if (saStandaloneEligible) {
             evaluated += "Smart Advisor"
             val msg = buildIncomingMessage(cleanMessage, senderName, isGroup, phone, startMs)
             val result = smartAdvisorClient.send(
@@ -414,6 +441,13 @@ class UnifiedReplyTester internal constructor(
             usedNewApi = lastAiOutcome?.usedNewApi == true,
             switchedToQwen = lastAiOutcome?.switchedToQwen == true,
             calledSmartAdvisor = lastAiOutcome?.calledSmartAdvisor == true,
+            calledWebhook = lastAiOutcome?.calledWebhook == true,
+            saToolReason = lastAiOutcome?.saToolReason.orEmpty(),
+            webhookToolReason = lastAiOutcome?.webhookToolReason.orEmpty(),
+            webhookDataSnippet = lastAiOutcome?.webhookDataSnippet.orEmpty(),
+            webhookStatusCode = lastAiOutcome?.webhookStatusCode,
+            invokedTools = lastAiOutcome?.invokedTools.orEmpty(),
+            toolRoundsUsed = lastAiOutcome?.toolRoundsUsed ?: 0,
             stageLatenciesMs = lastAiOutcome?.stageLatenciesMs.orEmpty(),
             redactedError = lastAiOutcome?.redactedError
         )

@@ -7,6 +7,7 @@ import com.example.data.local.entity.GroupReplyMode
 import com.example.data.local.entity.HeaderItem
 import com.example.data.local.entity.RequestField
 import com.example.data.local.entity.ServerConfigEntity
+import com.example.data.local.entity.WebhookMode
 import com.example.data.repository.ServerConfigRepository
 import com.example.engine.IncomingMessage
 import com.example.engine.VariableEngine
@@ -53,7 +54,8 @@ class ServerViewModel @Inject constructor(
         val statusCode: Int,
         val body: String,
         val error: String?,
-        val durationMs: Long
+        val durationMs: Long,
+        val isToolPreview: Boolean = false
     )
 
     private val _testResult = MutableStateFlow<TestResult?>(null)
@@ -114,6 +116,14 @@ class ServerViewModel @Inject constructor(
 
     fun updatePrivate(enabled: Boolean) {
         updateConfig { it.copy(sendOnPrivate = enabled) }
+    }
+
+    fun updateWebhookMode(mode: WebhookMode) {
+        updateConfig { it.copy(webhookMode = mode.name) }
+    }
+
+    fun updateToolDescription(description: String) {
+        updateConfig { it.copy(toolDescription = description) }
     }
 
     // Headers
@@ -316,23 +326,64 @@ class ServerViewModel @Inject constructor(
                     statusCode = result.code,
                     body = vault.redact(result.body),
                     error = null,
-                    durationMs = result.ms
+                    durationMs = result.ms,
+                    isToolPreview = false
                 )
                 is HttpTransport.Result.Conflict -> TestResult(
                     success = false,
                     statusCode = result.code,
                     body = vault.redact(result.body),
                     error = "تعارض من الخادم (HTTP 409)",
-                    durationMs = result.ms
+                    durationMs = result.ms,
+                    isToolPreview = false
                 )
                 is HttpTransport.Result.Failure -> TestResult(
                     success = false,
                     statusCode = result.code,
                     body = "",
                     error = vault.redact(result.error),
-                    durationMs = result.ms
+                    durationMs = result.ms,
+                    isToolPreview = false
                 )
             }
+            _isTesting.value = false
+        }
+    }
+
+    fun testAsAiTool(aiQuery: String = "الاستعلام عن حالة الطلب #1001") {
+        val current = _config.value ?: return
+        if (_isTesting.value) return
+        _isTesting.value = true
+        _testResult.value = null
+
+        viewModelScope.launch {
+            val sampleMsg = sampleIncomingMessage().copy(aiQuery = aiQuery)
+            val toolRes = webhookClient.invokeAsAiTool(
+                config = current,
+                msg = sampleMsg,
+                aiQuery = aiQuery,
+                reason = "اختبار نتيجة أداة AI"
+            )
+            val displayText = buildString {
+                append("المصدر: ${toolRes.sourceLabel} (درجة الثقة: خارجي غير متحقق منه)\n")
+                if (toolRes.extractedText.isNotBlank()) {
+                    append("النص المستخرج للـ AI:\n").append(toolRes.extractedText)
+                } else if (toolRes.rawExcerpt.isNotBlank()) {
+                    append("مقتطف الاستجابة المنقّح:\n").append(toolRes.rawExcerpt)
+                }
+                if (toolRes.truncated) {
+                    append("\n[تم اقتطاع الاستجابة للحد الأقصى المسموح]")
+                }
+            }.trim()
+
+            _testResult.value = TestResult(
+                success = toolRes.ok,
+                statusCode = toolRes.statusCode,
+                body = displayText,
+                error = toolRes.redactedError,
+                durationMs = toolRes.latencyMs,
+                isToolPreview = true
+            )
             _isTesting.value = false
         }
     }
@@ -361,7 +412,12 @@ class ServerViewModel @Inject constructor(
     }
 
     private fun updatePreview(config: ServerConfigEntity) {
-        val rawBody = VariableEngine.buildRequestBody(config, sampleIncomingMessage())
+        val sample = sampleIncomingMessage()
+        val rawBody = if (config.effectiveWebhookMode() == WebhookMode.AI_TOOL) {
+            webhookClient.buildAiToolBody(config, sample, sample.message, "معاينة أداة AI")
+        } else {
+            VariableEngine.buildRequestBody(config, sample)
+        }
         _previewJson.value = if (config.contentType.equals("JSON", ignoreCase = true)) {
             try {
                 val parsed = prettyJson.parseToJsonElement(rawBody)
@@ -424,7 +480,10 @@ class ServerViewModel @Inject constructor(
             timeoutSeconds = HttpTransport.DEFAULT_TIMEOUT_SECONDS,
             retryCount = HttpTransport.DEFAULT_MAX_ATTEMPTS,
             sendOnGroup = GroupReplyMode.KEYWORD_ONLY.name,
-            sendOnPrivate = true
+            sendOnPrivate = true,
+            webhookMode = WebhookMode.AI_TOOL.name,
+            toolDescription = ServerConfigEntity.DEFAULT_TOOL_DESCRIPTION,
+            toolMaxResponseChars = ServerConfigEntity.DEFAULT_TOOL_MAX_CHARS
         )
     }
 

@@ -69,46 +69,86 @@ class SA_WhatsApp_Settings {
     }
 
     public static function sanitize( $input ) {
-        $out = self::defaults();
-        $out['enabled'] = isset($input['enabled']) ? 1 : 0;
-        $out['integration_enabled'] = isset($input['integration_enabled']) ? 1 : 0;
-        $out['memory_sync_enabled'] = isset($input['memory_sync_enabled']) ? 1 : 0;
-        $out['knowledge_enabled'] = isset($input['knowledge_enabled']) ? 1 : 0;
-        $out['bot_name'] = sanitize_text_field( $input['bot_name'] ?? $out['bot_name'] );
-        $out['memory_minutes'] = max( 0, min( 1440, absint( $input['memory_minutes'] ?? 15 ) ) );
-        $out['whatsapp_number'] = preg_replace( '/[^0-9]/', '', sanitize_text_field( $input['whatsapp_number'] ?? '' ) );
-        $out['strict_sender_phone'] = isset( $input['strict_sender_phone'] ) ? 1 : 0;
-        $out['inbox_retention_days'] = max( 1, min( 90, absint( $input['inbox_retention_days'] ?? 14 ) ) );
-        $out['link_request_message'] = sanitize_textarea_field( $input['link_request_message'] ?? '' );
-        if ( $out['link_request_message'] === '' ) {
-            $out['link_request_message'] = self::defaults()['link_request_message'];
+        $defaults = self::defaults();
+        $old      = get_option( self::OPTION, [] );
+        if ( ! is_array( $old ) ) {
+            $old = [];
         }
-        
-        $out['magic_link_msg'] = sanitize_textarea_field( $input['magic_link_msg'] ?? '' );
-        if ( $out['magic_link_msg'] === '' ) {
-            $out['magic_link_msg'] = self::defaults()['magic_link_msg'];
+        if ( ! is_array( $input ) ) {
+            return wp_parse_args( $old, $defaults );
         }
 
-        if ( ! empty( $out['whatsapp_number'] ) ) {
-            update_option( 'sa_whatsapp_business_number', $out['whatsapp_number'], false );
+        $is_form_submit = ! empty( $input['_sa_form_submit'] );
+        $base           = wp_parse_args( $old, $defaults );
+        $out            = $defaults;
+
+        foreach ( [ 'enabled', 'integration_enabled', 'memory_sync_enabled', 'knowledge_enabled', 'strict_sender_phone' ] as $bool_key ) {
+            if ( $is_form_submit ) {
+                $out[ $bool_key ] = ! empty( $input[ $bool_key ] ) ? 1 : 0;
+            } elseif ( array_key_exists( $bool_key, $input ) ) {
+                $out[ $bool_key ] = ! empty( $input[ $bool_key ] ) ? 1 : 0;
+            } else {
+                $out[ $bool_key ] = ! empty( $base[ $bool_key ] ) ? 1 : 0;
+            }
         }
-        $out['max_history'] = max( 1, min( 20, absint( $input['max_history'] ?? 4 ) ) );
-        $valid_modes = ['text_only', 'single_link', 'multi_link'];
-        $out['reply_mode'] = in_array( $input['reply_mode'] ?? '', $valid_modes, true ) ? $input['reply_mode'] : 'single_link';
-        
+
+        $out['bot_name']             = sanitize_text_field( $input['bot_name'] ?? $base['bot_name'] );
+        $out['memory_minutes']       = max( 0, min( 1440, absint( $input['memory_minutes'] ?? $base['memory_minutes'] ) ) );
+        $has_wa_number               = $is_form_submit || array_key_exists( 'whatsapp_number', $input );
+        $raw_wa_number               = $has_wa_number ? ( $input['whatsapp_number'] ?? '' ) : $base['whatsapp_number'];
+        $out['whatsapp_number']      = preg_replace( '/[^0-9]/', '', sanitize_text_field( $raw_wa_number ) );
+        $out['inbox_retention_days'] = max( 1, min( 90, absint( $input['inbox_retention_days'] ?? $base['inbox_retention_days'] ) ) );
+
+        $link_req_raw                = array_key_exists( 'link_request_message', $input ) ? $input['link_request_message'] : $base['link_request_message'];
+        $out['link_request_message'] = sanitize_textarea_field( $link_req_raw );
+        if ( '' === $out['link_request_message'] ) {
+            $out['link_request_message'] = $defaults['link_request_message'];
+        }
+
+        $magic_raw             = array_key_exists( 'magic_link_msg', $input ) ? $input['magic_link_msg'] : $base['magic_link_msg'];
+        $out['magic_link_msg'] = sanitize_textarea_field( $magic_raw );
+        if ( '' === $out['magic_link_msg'] ) {
+            $out['magic_link_msg'] = $defaults['magic_link_msg'];
+        }
+
+        if ( $has_wa_number ) {
+            if ( '' !== $out['whatsapp_number'] ) {
+                update_option( 'sa_whatsapp_business_number', $out['whatsapp_number'], false );
+            } else {
+                delete_option( 'sa_whatsapp_business_number' );
+            }
+        }
+
+        $out['max_history'] = max( 1, min( 20, absint( $input['max_history'] ?? $base['max_history'] ) ) );
+        $valid_modes        = [ 'text_only', 'single_link', 'multi_link' ];
+        $candidate_mode     = $input['reply_mode'] ?? $base['reply_mode'];
+        $out['reply_mode']  = in_array( $candidate_mode, $valid_modes, true ) ? $candidate_mode : 'single_link';
+
         // No editable WhatsApp reply templates: AutoMate AI composes customer-facing messages.
         $out['reply_templates'] = self::defaults()['reply_templates'];
 
+        $base_skills   = wp_parse_args( is_array( $old['skills'] ?? null ) ? $old['skills'] : [], $defaults['skills'] );
+        $input_skills  = isset( $input['skills'] ) && is_array( $input['skills'] ) ? $input['skills'] : null;
         $out['skills'] = [];
-        foreach ( array_keys(self::defaults()['skills']) as $sk ) {
-            $out['skills'][$sk] = isset($input['skills'][$sk]) ? 1 : 0;
+        foreach ( array_keys( $defaults['skills'] ) as $sk ) {
+            if ( $is_form_submit ) {
+                $out['skills'][ $sk ] = ( null !== $input_skills && ! empty( $input_skills[ $sk ] ) ) ? 1 : 0;
+            } elseif ( null !== $input_skills && array_key_exists( $sk, $input_skills ) ) {
+                $out['skills'][ $sk ] = ! empty( $input_skills[ $sk ] ) ? 1 : 0;
+            } else {
+                $out['skills'][ $sk ] = ! empty( $base_skills[ $sk ] ) ? 1 : 0;
+            }
         }
 
         if ( ! empty( $input['generate_new_key'] ) ) {
             $new_key = 'SA_WA_' . wp_generate_password( 56, false, false );
-            $secret = defined('AUTH_KEY') ? AUTH_KEY : wp_salt('auth');
+            $secret  = defined( 'AUTH_KEY' ) ? AUTH_KEY : wp_salt( 'auth' );
             update_option( 'sa_whatsapp_api_key_hash', hash_hmac( 'sha256', $new_key, $secret ), false );
             update_user_meta( get_current_user_id(), 'sa_wa_new_key_reveal', $new_key );
+        }
+
+        if ( class_exists( 'SA_Settings' ) ) {
+            SA_Settings::record_pending_write( self::OPTION, $out );
         }
 
         return $out;
@@ -124,6 +164,13 @@ class SA_WhatsApp_Settings {
         ?>
         <div class="wrap" dir="rtl">
             <h1>📱 إعدادات الربط مع الواتساب</h1>
+            <?php
+            if ( class_exists( 'SA_Settings' ) ) {
+                SA_Settings::render_save_notices( '✅ تم حفظ إعدادات الواتساب والتحقق من تخزينها بنجاح.' );
+            } elseif ( function_exists( 'settings_errors' ) ) {
+                settings_errors();
+            }
+            ?>
             <?php if ( $new_key_msg ) : ?>
                 <div class="notice notice-success is-dismissible" style="border-right-color:#00a32a">
                     <p><strong>تم توليد المفتاح الجديد بنجاح!</strong> انسخه الآن (لن يظهر مرة أخرى):</p>
@@ -134,6 +181,7 @@ class SA_WhatsApp_Settings {
             <div class="notice notice-info inline"><p><strong>نقطة الربط:</strong> هذا المسار يستقبل طلبات الرد من وسيط واتساب خارجي، ولا ينشئ اتصالاً تلقائياً بحساب WhatsApp Business.</p><p>عنوان API: <code><?php echo esc_html( rest_url( 'smart-advisor/v1/whatsapp/reply' ) ); ?></code></p><p>أرسل المفتاح في ترويسة <code>X-SA-API-Key</code>، ومُعرّف الرسالة لمنع التكرار عبر <code>message_id</code> أو ترويسة <code>X-Message-ID</code> / <code>Idempotency-Key</code>، والبيانات بصيغة JSON: <code>{"provider":"automate_ai","message_id":"msg_123","sender":"رقم المرسل","phone":"967777123456","message":"نص الرسالة"}</code>.</p></div>
             <form method="post" action="options.php">
                 <?php settings_fields( 'sa_whatsapp_group' ); ?>
+                <input type="hidden" name="<?php echo esc_attr( self::OPTION ); ?>[_sa_form_submit]" value="1">
                 
                 <h2 class="title">1. إعدادات عامة</h2>
                 <table class="form-table">
