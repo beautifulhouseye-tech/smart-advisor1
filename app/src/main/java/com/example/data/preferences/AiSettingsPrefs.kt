@@ -14,6 +14,41 @@ import kotlinx.coroutines.flow.asStateFlow
 import javax.inject.Inject
 import javax.inject.Singleton
 
+enum class ResponseTone(
+    val labelAr: String,
+    val promptInstruction: String
+) {
+    FRIENDLY("ودية", "استخدم نبرة ودية دافئة ومرحبة تشعر العميل بالراحة."),
+    FORMAL("رسمية", "استخدم نبرة رسمية راقية ومهنية واضحة."),
+    PROFESSIONAL("احترافية", "استخدم نبرة احترافية متزنة وموثوقة ومباشرة."),
+    MARKETING("تسويقية", "استخدم نبرة تسويقية جذابة تبرز القيمة والمزايا دون مبالغة أو اختلاق معلومات."),
+    CONCISE_DIRECT("مختصرة ومباشرة", "كن مختصراً ومباشراً جداً وادخل في صلب الإجابة دون حشو."),
+    CUSTOM("مخصصة", "اتبع تعليمات النبرة والأسلوب المخصصة التالية بدقة:")
+}
+
+enum class ResponseLength(
+    val labelAr: String,
+    val defaultMaxChars: Int,
+    val suggestedTokens: Int,
+    val maxSentencesHint: Int,
+    val promptInstruction: String
+) {
+    VERY_SHORT("قصير جداً", 140, 90, 2, "أجب في جملة إلى جملتين كحد أقصى وبإيجاز شديد."),
+    SHORT("قصير", 320, 160, 3, "أجب باختصار واضح في فقرة قصيرة (2-3 جمل)."),
+    MEDIUM("متوسط", 650, 320, 6, "أجب بتفصيل متوازن يوضح النقاط الأساسية في فقرة إلى فقرتين."),
+    DETAILED("مفصل", 1200, 700, 12, "أجب بشرح وافٍ ومنظم يغطي جميع التفاصيل المهمة دون حشو.")
+}
+
+enum class ReplyLanguage(
+    val labelAr: String,
+    val promptInstruction: String
+) {
+    AUTO("تلقائي (لغة العميل)", "التزم بلغة رسالة العميل نفسها (العربية للعربية والإنجليزية للإنجليزية)."),
+    ARABIC("العربية", "اكتب الرد النهائي باللغة العربية السلسة الواضحة."),
+    ENGLISH("الإنجليزية", "Write the final customer reply strictly in clear, natural English."),
+    CUSTOM("لغة محددة", "اكتب الرد النهائي باللغة التالية:")
+}
+
 data class AiSettingsState(
     val enabled: Boolean = false,
     val provider: AIReplyEngine.Provider = AIReplyEngine.Provider.OPENAI,
@@ -34,13 +69,42 @@ data class AiSettingsState(
     val safeFallbackReply: String = "",
     val lastPrimaryStatus: String = "غير مختبر",
     val lastFallbackStatus: String = "غير مختبر",
-    val lastErrorRedacted: String = ""
+    val lastErrorRedacted: String = "",
+    val responseTone: ResponseTone = ResponseTone.PROFESSIONAL,
+    val customToneInstruction: String = "",
+    val responseLength: ResponseLength = ResponseLength.SHORT,
+    val maxReplyLengthChars: Int = DEFAULT_MAX_REPLY_LENGTH_CHARS,
+    val replyLanguage: ReplyLanguage = ReplyLanguage.AUTO,
+    val customReplyLanguage: String = "",
+    val useConversationContext: Boolean = true,
+    val useKeywordRules: Boolean = true,
+    val webhookToolEnabled: Boolean = true
 ) {
     fun effectivePrimaryModel(): String =
         primaryModel.trim().ifBlank { model.trim().ifBlank { provider.defaultModels.first() } }
 
     fun effectiveOllamaModel(): String =
         ollamaModel.trim().ifBlank { DEFAULT_QWEN_MODEL }
+
+    fun effectiveMaxReplyChars(): Int =
+        maxReplyLengthChars.coerceIn(MIN_REPLY_LENGTH_CHARS, MAX_REPLY_LENGTH_CHARS)
+
+    fun effectiveToneInstruction(): String = when (responseTone) {
+        ResponseTone.CUSTOM -> customToneInstruction.trim().ifBlank {
+            ResponseTone.PROFESSIONAL.promptInstruction
+        }.let { "${ResponseTone.CUSTOM.promptInstruction} $it" }
+        else -> responseTone.promptInstruction
+    }
+
+    fun effectiveLengthInstruction(): String =
+        "${responseLength.promptInstruction} (الحد الأقصى لطول الرد النهائي: ${effectiveMaxReplyChars()} حرفاً)."
+
+    fun effectiveLanguageInstruction(): String = when (replyLanguage) {
+        ReplyLanguage.CUSTOM -> customReplyLanguage.trim().ifBlank {
+            ReplyLanguage.AUTO.promptInstruction
+        }.let { "${ReplyLanguage.CUSTOM.promptInstruction} $it" }
+        else -> replyLanguage.promptInstruction
+    }
 
     companion object {
         const val DEFAULT_SYSTEM_PROMPT =
@@ -49,6 +113,9 @@ data class AiSettingsState(
         const val DEFAULT_CONTEXT_WINDOW_PAIRS = 6
         const val MIN_CONTEXT_WINDOW_PAIRS = 6
         const val MAX_CONTEXT_WINDOW_PAIRS = 8
+        const val DEFAULT_MAX_REPLY_LENGTH_CHARS = 320
+        const val MIN_REPLY_LENGTH_CHARS = 40
+        const val MAX_REPLY_LENGTH_CHARS = 2000
     }
 }
 
@@ -87,6 +154,10 @@ class AiSettingsPrefs internal constructor(
             AiSettingsState.MIN_CONTEXT_WINDOW_PAIRS,
             AiSettingsState.MAX_CONTEXT_WINDOW_PAIRS
         )
+        val cleanMaxChars = settings.maxReplyLengthChars.coerceIn(
+            AiSettingsState.MIN_REPLY_LENGTH_CHARS,
+            AiSettingsState.MAX_REPLY_LENGTH_CHARS
+        )
         prefs.edit(commit = true) {
             putBoolean(KEY_ENABLED, settings.enabled)
             putString(KEY_PROVIDER, settings.provider.name)
@@ -111,6 +182,15 @@ class AiSettingsPrefs internal constructor(
             putString(KEY_LAST_PRIMARY_STATUS, settings.lastPrimaryStatus.trim())
             putString(KEY_LAST_FALLBACK_STATUS, settings.lastFallbackStatus.trim())
             putString(KEY_LAST_ERROR_REDACTED, SensitiveDataRedactor.scrub(settings.lastErrorRedacted.trim()))
+            putString(KEY_RESPONSE_TONE, settings.responseTone.name)
+            putString(KEY_CUSTOM_TONE_INSTRUCTION, settings.customToneInstruction.trim())
+            putString(KEY_RESPONSE_LENGTH, settings.responseLength.name)
+            putInt(KEY_MAX_REPLY_LENGTH_CHARS, cleanMaxChars)
+            putString(KEY_REPLY_LANGUAGE, settings.replyLanguage.name)
+            putString(KEY_CUSTOM_REPLY_LANGUAGE, settings.customReplyLanguage.trim())
+            putBoolean(KEY_USE_CONVERSATION_CONTEXT, settings.useConversationContext)
+            putBoolean(KEY_USE_KEYWORD_RULES, settings.useKeywordRules)
+            putBoolean(KEY_WEBHOOK_TOOL_ENABLED, settings.webhookToolEnabled)
         }
         _state.value = read()
     }
@@ -136,6 +216,18 @@ class AiSettingsPrefs internal constructor(
         val provider = runCatching {
             AIReplyEngine.Provider.valueOf(providerName ?: AIReplyEngine.Provider.OPENAI.name)
         }.getOrDefault(AIReplyEngine.Provider.OPENAI)
+
+        val tone = runCatching {
+            ResponseTone.valueOf(prefs.getString(KEY_RESPONSE_TONE, ResponseTone.PROFESSIONAL.name) ?: ResponseTone.PROFESSIONAL.name)
+        }.getOrDefault(ResponseTone.PROFESSIONAL)
+
+        val length = runCatching {
+            ResponseLength.valueOf(prefs.getString(KEY_RESPONSE_LENGTH, ResponseLength.SHORT.name) ?: ResponseLength.SHORT.name)
+        }.getOrDefault(ResponseLength.SHORT)
+
+        val language = runCatching {
+            ReplyLanguage.valueOf(prefs.getString(KEY_REPLY_LANGUAGE, ReplyLanguage.AUTO.name) ?: ReplyLanguage.AUTO.name)
+        }.getOrDefault(ReplyLanguage.AUTO)
 
         return AiSettingsState(
             enabled = prefs.getBoolean(KEY_ENABLED, false),
@@ -170,7 +262,22 @@ class AiSettingsPrefs internal constructor(
             safeFallbackReply = prefs.getString(KEY_SAFE_FALLBACK_REPLY, "").orEmpty(),
             lastPrimaryStatus = prefs.getString(KEY_LAST_PRIMARY_STATUS, "غير مختبر").orEmpty(),
             lastFallbackStatus = prefs.getString(KEY_LAST_FALLBACK_STATUS, "غير مختبر").orEmpty(),
-            lastErrorRedacted = prefs.getString(KEY_LAST_ERROR_REDACTED, "").orEmpty()
+            lastErrorRedacted = prefs.getString(KEY_LAST_ERROR_REDACTED, "").orEmpty(),
+            responseTone = tone,
+            customToneInstruction = prefs.getString(KEY_CUSTOM_TONE_INSTRUCTION, "").orEmpty(),
+            responseLength = length,
+            maxReplyLengthChars = prefs.getInt(
+                KEY_MAX_REPLY_LENGTH_CHARS,
+                length.defaultMaxChars
+            ).coerceIn(
+                AiSettingsState.MIN_REPLY_LENGTH_CHARS,
+                AiSettingsState.MAX_REPLY_LENGTH_CHARS
+            ),
+            replyLanguage = language,
+            customReplyLanguage = prefs.getString(KEY_CUSTOM_REPLY_LANGUAGE, "").orEmpty(),
+            useConversationContext = prefs.getBoolean(KEY_USE_CONVERSATION_CONTEXT, true),
+            useKeywordRules = prefs.getBoolean(KEY_USE_KEYWORD_RULES, true),
+            webhookToolEnabled = prefs.getBoolean(KEY_WEBHOOK_TOOL_ENABLED, true)
         )
     }
 
@@ -196,6 +303,15 @@ class AiSettingsPrefs internal constructor(
         private const val KEY_LAST_PRIMARY_STATUS = "ai_last_primary_status"
         private const val KEY_LAST_FALLBACK_STATUS = "ai_last_fallback_status"
         private const val KEY_LAST_ERROR_REDACTED = "ai_last_error_redacted"
+        private const val KEY_RESPONSE_TONE = "ai_response_tone"
+        private const val KEY_CUSTOM_TONE_INSTRUCTION = "ai_custom_tone_instruction"
+        private const val KEY_RESPONSE_LENGTH = "ai_response_length"
+        private const val KEY_MAX_REPLY_LENGTH_CHARS = "ai_max_reply_length_chars"
+        private const val KEY_REPLY_LANGUAGE = "ai_reply_language"
+        private const val KEY_CUSTOM_REPLY_LANGUAGE = "ai_custom_reply_language"
+        private const val KEY_USE_CONVERSATION_CONTEXT = "ai_use_conversation_context"
+        private const val KEY_USE_KEYWORD_RULES = "ai_use_keyword_rules"
+        private const val KEY_WEBHOOK_TOOL_ENABLED = "ai_webhook_tool_enabled"
 
         const val KEY_REF_NEW_API = "ai_api_key_new_api"
         const val KEY_REF_OLLAMA = "ai_api_key_ollama"

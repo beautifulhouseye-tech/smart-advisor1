@@ -84,7 +84,8 @@ class SmartCollaborationCoordinator(
         val messageText: String,
         val isSandbox: Boolean = false,
         val conversationKeyOverride: String? = null,
-        val messageId: String = ""
+        val messageId: String = "",
+        val keywordContextHint: String = ""
     )
 
     data class CollaborationOutcome(
@@ -154,7 +155,8 @@ class SmartCollaborationCoordinator(
             smartAdvisorClient.assistantBaseUrl().isNotBlank()
 
         val serverConfig = serverRepo?.get()
-        val webhookToolAvailable = webhookClient != null &&
+        val webhookToolAvailable = aiSettings.webhookToolEnabled &&
+            webhookClient != null &&
             serverConfig != null &&
             serverConfig.isEnabled &&
             serverConfig.effectiveWebhookMode() == WebhookMode.AI_TOOL &&
@@ -169,7 +171,8 @@ class SmartCollaborationCoordinator(
             capabilities = smartAdvisorClient.fetchCapabilities()
             latencies["sa_capabilities"] = (clockMs() - capStart).coerceAtLeast(0L)
 
-            if (aiSettings.syncCustomerMemory &&
+            if (aiSettings.useConversationContext &&
+                aiSettings.syncCustomerMemory &&
                 capabilities.memoryEnabled &&
                 !input.isGroup &&
                 contextEntity.customerKey.isNotBlank() &&
@@ -196,11 +199,19 @@ class SmartCollaborationCoordinator(
             }
         }
 
-        val recentTurns = conversationMemoryManager.buildTurnsForAi(
-            context = contextEntity,
-            excludeLastUserMessage = true
-        )
-        val localContextBlock = conversationMemoryManager.buildContextSummaryBlock(contextEntity)
+        val recentTurns = if (aiSettings.useConversationContext) {
+            conversationMemoryManager.buildTurnsForAi(
+                context = contextEntity,
+                excludeLastUserMessage = true
+            )
+        } else {
+            emptyList()
+        }
+        val localContextBlock = if (aiSettings.useConversationContext) {
+            conversationMemoryManager.buildContextSummaryBlock(contextEntity)
+        } else {
+            ""
+        }
         val pass1SystemPrompt = buildPass1SystemInstruction(
             aiSettings = aiSettings,
             senderName = input.rawTitle.ifBlank { input.senderName },
@@ -210,7 +221,8 @@ class SmartCollaborationCoordinator(
             saAvailable = saAvailable,
             capabilities = capabilities,
             webhookToolAvailable = webhookToolAvailable,
-            webhookConfig = serverConfig
+            webhookConfig = serverConfig,
+            keywordContextHint = input.keywordContextHint
         )
 
         val pass1Outcome = aiReplyEngine.runCollaborationTurn(
@@ -225,8 +237,7 @@ class SmartCollaborationCoordinator(
         }
 
         val decision1 = pass1Outcome.decision
-        val usedNewApiFlag = aiSettings.provider == AIReplyEngine.Provider.NEW_API ||
-            aiSettings.primaryBaseUrl.isNotBlank()
+        val usedNewApiFlag = aiSettings.provider == AIReplyEngine.Provider.NEW_API
 
         if (decision1 == null) {
             aiSettingsPrefs.updateHealthStatus(
@@ -276,6 +287,8 @@ class SmartCollaborationCoordinator(
         val invokedTools = linkedSetOf<String>()
         val executedSignatures = mutableSetOf<String>()
         val collectedToolNotes = mutableListOf<CollectedToolNote>()
+        val turnMemoKey = input.messageId.trim().takeIf { it.isNotEmpty() && !input.isSandbox }
+        val memoForMessage = turnMemoKey?.let { getOrCreateTurnMemo(it) }
         var roundsUsed = 0
 
         // Bounded multi-tool orchestration loop
@@ -319,18 +332,30 @@ class SmartCollaborationCoordinator(
                         )
                     } else if (saAvailable && capabilities?.accountActionsEnabled == true) {
                         executedSignatures += actionSig
-                        calledSmartAdvisor = true
-                        invokedTools += TOOL_SMART_ADVISOR
-                        saToolReason = "account_action:$cleanAction"
-                        val actionStart = clockMs()
-                        val actionRes = smartAdvisorClient.performAccountAction(
-                            action = cleanAction,
-                            customerKey = contextEntity.customerKey,
-                            phone = input.phone,
-                            name = input.senderName,
-                            idempotencyKey = if (input.isSandbox) null else input.messageId.ifBlank { null }
-                        )
-                        latencies["sa_account_action"] = (clockMs() - actionStart).coerceAtLeast(0L)
+                        val cachedActionRes = memoForMessage?.accountActions?.get(cleanAction)
+                        val actionRes = if (cachedActionRes != null) {
+                            calledSmartAdvisor = true
+                            invokedTools += TOOL_SMART_ADVISOR
+                            saToolReason = "account_action:$cleanAction"
+                            cachedActionRes
+                        } else {
+                            calledSmartAdvisor = true
+                            invokedTools += TOOL_SMART_ADVISOR
+                            saToolReason = "account_action:$cleanAction"
+                            val actionStart = clockMs()
+                            smartAdvisorClient.performAccountAction(
+                                action = cleanAction,
+                                customerKey = contextEntity.customerKey,
+                                phone = input.phone,
+                                name = input.senderName,
+                                idempotencyKey = if (input.isSandbox) null else input.messageId.ifBlank { null }
+                            ).also { res ->
+                                latencies["sa_account_action"] = (clockMs() - actionStart).coerceAtLeast(0L)
+                                if (res.ok) {
+                                    memoForMessage?.accountActions?.put(cleanAction, res)
+                                }
+                            }
+                        }
 
                         if (actionRes.ok) {
                             verifiedStoreDataUsed = true
@@ -391,14 +416,27 @@ class SmartCollaborationCoordinator(
                 it.tool == "smart_advisor" || it.tool == "smartadvisor" || it.tool == "sa"
             }
             if (currentDecision.needsStoreData || requestedSaTool != null) {
-                val queryText = (requestedSaTool?.query?.takeIf { it.isNotBlank() }
-                    ?: currentDecision.storeQuery.ifBlank { input.messageText }).trim()
+                val rawSaQuery = (requestedSaTool?.query?.takeIf { it.isNotBlank() }
+                    ?: currentDecision.storeQuery).trim()
                 val resolvedIntent = SmartAdvisorClient.normalizeKnowledgeIntent(
                     requestedSaTool?.intent?.takeIf { it.isNotBlank() }
                         ?: currentDecision.storeIntent.ifBlank { currentDecision.intent }
                 )
+                val activeEntityHint = if (aiSettings.useConversationContext) {
+                    conversationMemoryManager.resolveActiveEntityHint(contextEntity).trim()
+                } else {
+                    ""
+                }
+                val queryText = resolveContextualToolQuery(
+                    modelQuery = rawSaQuery,
+                    userMessage = input.messageText,
+                    resolvedIntent = resolvedIntent,
+                    activeEntityHint = activeEntityHint,
+                    lastProductDiscussed = contextEntity.lastProductDiscussed
+                )
                 saIntent = resolvedIntent
-                val saSig = "sa:${queryText.lowercase()}:$resolvedIntent"
+                val normalizedQueryKey = normalizeToolKey(queryText)
+                val saSig = "sa:$normalizedQueryKey:$resolvedIntent"
 
                 if (saSig !in executedSignatures) {
                     executedSignatures += saSig
@@ -408,16 +446,25 @@ class SmartCollaborationCoordinator(
                         saToolReason = requestedSaTool?.reason?.ifBlank { queryText } ?: queryText
                         newToolExecuted = true
 
-                        val saStart = clockMs()
-                        val knowledge = smartAdvisorClient.queryKnowledge(
-                            query = queryText,
-                            intent = resolvedIntent,
-                            customerKey = contextEntity.customerKey,
-                            isGroup = input.isGroup
-                        )
-                        latencies["smart_advisor_knowledge"] =
-                            (latencies["smart_advisor_knowledge"] ?: 0L) +
-                                (clockMs() - saStart).coerceAtLeast(0L)
+                        val cachedKnowledge = memoForMessage?.knowledge?.get(saSig)
+                        val knowledge = if (cachedKnowledge != null) {
+                            cachedKnowledge
+                        } else {
+                            val saStart = clockMs()
+                            smartAdvisorClient.queryKnowledge(
+                                query = queryText,
+                                intent = resolvedIntent,
+                                customerKey = contextEntity.customerKey,
+                                isGroup = input.isGroup
+                            ).also { res ->
+                                latencies["smart_advisor_knowledge"] =
+                                    (latencies["smart_advisor_knowledge"] ?: 0L) +
+                                        (clockMs() - saStart).coerceAtLeast(0L)
+                                if (res.ok) {
+                                    memoForMessage?.knowledge?.put(saSig, res)
+                                }
+                            }
+                        }
 
                         if (knowledge.ok && knowledge.hasVerifiedData) {
                             lastVerifiedKnowledge = knowledge
@@ -471,11 +518,23 @@ class SmartCollaborationCoordinator(
                 it.tool == "webhook" || it.tool == "server" || it.tool == "external_webhook"
             }
             if (currentDecision.needsWebhookData || requestedWebhookTool != null) {
-                val queryText = (requestedWebhookTool?.query?.takeIf { it.isNotBlank() }
-                    ?: currentDecision.webhookQuery.ifBlank { input.messageText }).trim()
+                val rawWhQuery = (requestedWebhookTool?.query?.takeIf { it.isNotBlank() }
+                    ?: currentDecision.webhookQuery).trim()
+                val activeEntityHint = if (aiSettings.useConversationContext) {
+                    conversationMemoryManager.resolveActiveEntityHint(contextEntity).trim()
+                } else {
+                    ""
+                }
+                val queryText = resolveContextualToolQuery(
+                    modelQuery = rawWhQuery,
+                    userMessage = input.messageText,
+                    resolvedIntent = currentDecision.intent,
+                    activeEntityHint = activeEntityHint,
+                    lastProductDiscussed = contextEntity.lastProductDiscussed
+                )
                 val reasonText = (requestedWebhookTool?.reason?.takeIf { it.isNotBlank() }
                     ?: currentDecision.webhookReason.ifBlank { queryText }).trim()
-                val whSig = "webhook:${queryText.lowercase()}"
+                val whSig = "webhook:${normalizeToolKey(queryText)}"
 
                 if (whSig !in executedSignatures) {
                     executedSignatures += whSig
@@ -485,29 +544,38 @@ class SmartCollaborationCoordinator(
                         webhookToolReason = reasonText
                         newToolExecuted = true
 
-                        val whStart = clockMs()
-                        val msgForWebhook = IncomingMessage(
-                            app = input.packageName,
-                            sender = input.senderName,
-                            senderName = input.senderName,
-                            message = input.messageText,
-                            phone = input.phone,
-                            groupName = input.groupName.orEmpty(),
-                            isGroup = input.isGroup,
-                            notificationId = input.messageId.ifBlank { "ai-tool-${clockMs()}" },
-                            timestamp = clockMs(),
-                            aiQuery = queryText
-                        )
-                        val whRes = webhookClient.invokeAsAiTool(
-                            config = serverConfig,
-                            msg = msgForWebhook,
-                            aiQuery = queryText,
-                            idempotencyKey = if (input.isSandbox) null else input.messageId.ifBlank { null },
-                            reason = reasonText
-                        )
-                        latencies["webhook_tool"] =
-                            (latencies["webhook_tool"] ?: 0L) +
-                                (clockMs() - whStart).coerceAtLeast(0L)
+                        val cachedWh = memoForMessage?.webhooks?.get(whSig)
+                        val whRes = if (cachedWh != null) {
+                            cachedWh
+                        } else {
+                            val whStart = clockMs()
+                            val msgForWebhook = IncomingMessage(
+                                app = input.packageName,
+                                sender = input.senderName,
+                                senderName = input.senderName,
+                                message = input.messageText,
+                                phone = input.phone,
+                                groupName = input.groupName.orEmpty(),
+                                isGroup = input.isGroup,
+                                notificationId = input.messageId.ifBlank { "ai-tool-${clockMs()}" },
+                                timestamp = clockMs(),
+                                aiQuery = queryText
+                            )
+                            webhookClient.invokeAsAiTool(
+                                config = serverConfig,
+                                msg = msgForWebhook,
+                                aiQuery = queryText,
+                                idempotencyKey = if (input.isSandbox) null else input.messageId.ifBlank { null },
+                                reason = reasonText
+                            ).also { res ->
+                                latencies["webhook_tool"] =
+                                    (latencies["webhook_tool"] ?: 0L) +
+                                        (clockMs() - whStart).coerceAtLeast(0L)
+                                if (res.ok) {
+                                    memoForMessage?.webhooks?.put(whSig, res)
+                                }
+                            }
+                        }
 
                         webhookStatusCode = whRes.statusCode
                         val candidateSnippet = whRes.extractedText.ifBlank { whRes.rawExcerpt }
@@ -751,7 +819,8 @@ class SmartCollaborationCoordinator(
                 } else {
                     SensitiveDataRedactor.scrub(raw, secretVault)
                 }
-                secretVault.redact(scrubbed)
+                val redacted = secretVault.redact(scrubbed)
+                AIReplyEngine.enforceToneAndLength(redacted, aiSettings)
             }
 
         return CollaborationOutcome(
@@ -843,10 +912,17 @@ class SmartCollaborationCoordinator(
         val pass2 = aiReplyEngine.runCollaborationTurn(
             settings = settings,
             userMessage = userMessage,
-            systemInstruction = "أعد صياغة هذه النتيجة بأسلوب مهذب ومختصر جداً باللغة العربية دون أي إضافات غير مؤكدة:\n$fact",
+            systemInstruction = buildString {
+                append("أعد صياغة هذه النتيجة بأسلوب مهذب دون أي إضافات غير مؤكدة:\n")
+                append(fact).append("\n")
+                append("- النبرة: ").append(settings.effectiveToneInstruction()).append('\n')
+                append("- الطول: ").append(settings.effectiveLengthInstruction()).append('\n')
+                append("- اللغة: ").append(settings.effectiveLanguageInstruction())
+            },
             recentTurns = recentTurns
         )
-        return pass2.decision?.reply?.takeIf { it.isNotBlank() } ?: fact
+        val raw = pass2.decision?.reply?.takeIf { it.isNotBlank() } ?: fact
+        return AIReplyEngine.enforceToneAndLength(raw, settings)
     }
 
     private fun buildNoVerifiedDataReply(
@@ -897,7 +973,8 @@ class SmartCollaborationCoordinator(
         saAvailable: Boolean,
         capabilities: SmartAdvisorClient.SaCapabilities?,
         webhookToolAvailable: Boolean,
-        webhookConfig: ServerConfigEntity?
+        webhookConfig: ServerConfigEntity?,
+        keywordContextHint: String = ""
     ): String {
         return buildString {
             if (aiSettings.systemPrompt.isNotBlank()) {
@@ -906,6 +983,13 @@ class SmartCollaborationCoordinator(
             append("أنت المنسّق الوحيد للمحادثة (Single Conversation Orchestrator) في تطبيق AutoMate AI. ")
             append("العميل: ").append(senderName).append(" (")
                 .append(if (isGroup) "محادثة جماعية" else "محادثة خاصة").append(").\n")
+            append("\nضوابط الأسلوب والطول واللغة:\n")
+            append("- النبرة: ").append(aiSettings.effectiveToneInstruction()).append('\n')
+            append("- الطول: ").append(aiSettings.effectiveLengthInstruction()).append('\n')
+            append("- اللغة: ").append(aiSettings.effectiveLanguageInstruction()).append('\n')
+            if (keywordContextHint.isNotBlank()) {
+                append("\nملاحظة من قاعدة كلمات مفتاحية مطابقة: ").append(keywordContextHint.trim()).append('\n')
+            }
             if (localContextBlock.isNotBlank()) {
                 append("\nسياق المحادثة الحالي:\n").append(localContextBlock).append('\n')
             }
@@ -949,6 +1033,10 @@ class SmartCollaborationCoordinator(
                 append(aiSettings.systemPrompt.trim()).append("\n\n")
             }
             append("أنت المنسّق الوحيد للمحادثة. العميل: ").append(senderName).append('\n')
+            append("ضوابط الأسلوب والطول واللغة:\n")
+            append("- النبرة: ").append(aiSettings.effectiveToneInstruction()).append('\n')
+            append("- الطول: ").append(aiSettings.effectiveLengthInstruction()).append('\n')
+            append("- اللغة: ").append(aiSettings.effectiveLanguageInstruction()).append('\n')
             if (localContextBlock.isNotBlank()) {
                 append("سياق الجلسة:\n").append(localContextBlock).append('\n')
             }
@@ -968,9 +1056,81 @@ class SmartCollaborationCoordinator(
             } else {
                 append("- اكتملت جولات الأدوات؛ أرسل الآن الرد النهائي الموحد للعميل.\n")
             }
-            append("- أعد بصيغة JSON تحتوي الحقل reply باللغة العربية وبأسلوب مهذب ومختصر مع confidence و needs_human.")
+            append("- أعد بصيغة JSON تحتوي الحقل reply وفق النبرة والطول واللغة المحددة أعلاه مع confidence و needs_human.")
         }.trim()
     }
+
+    private data class TurnToolMemo(
+        val createdAtMs: Long,
+        val knowledge: MutableMap<String, SmartAdvisorClient.SaKnowledgeResponse> = mutableMapOf(),
+        val accountActions: MutableMap<String, SmartAdvisorClient.SaAccountActionResponse> = mutableMapOf(),
+        val webhooks: MutableMap<String, WebhookClient.WebhookToolResult> = mutableMapOf()
+    )
+
+    private val turnToolCache = java.util.concurrent.ConcurrentHashMap<String, TurnToolMemo>()
+
+    private fun getOrCreateTurnMemo(messageId: String): TurnToolMemo {
+        val now = clockMs()
+        if (turnToolCache.size > 32) {
+            turnToolCache.entries.removeIf { now - it.value.createdAtMs > 60_000L }
+        }
+        return turnToolCache.compute(messageId) { _, existing ->
+            if (existing != null && (now - existing.createdAtMs) <= 60_000L) {
+                existing
+            } else {
+                TurnToolMemo(createdAtMs = now)
+            }
+        }!!
+    }
+
+    private fun resolveContextualToolQuery(
+        modelQuery: String,
+        userMessage: String,
+        resolvedIntent: String,
+        activeEntityHint: String,
+        lastProductDiscussed: String
+    ): String {
+        val cleanUser = userMessage.trim()
+        val cleanModel = modelQuery.trim()
+        val baseProduct = lastProductDiscussed.trim()
+        val isPolicyOrOrderIntent = resolvedIntent.equals("policy", ignoreCase = true) ||
+            resolvedIntent.equals("order_status", ignoreCase = true)
+
+        if (cleanModel.isBlank()) {
+            if (!isPolicyOrOrderIntent &&
+                activeEntityHint.isNotBlank() &&
+                baseProduct.isNotBlank() &&
+                !cleanUser.contains(baseProduct, ignoreCase = true)
+            ) {
+                return "$activeEntityHint - $cleanUser".trim()
+            }
+            return cleanUser
+        }
+
+        if (!isPolicyOrOrderIntent &&
+            activeEntityHint.isNotBlank() &&
+            baseProduct.isNotBlank() &&
+            !cleanModel.contains(baseProduct, ignoreCase = true) &&
+            isVagueFollowUpQuery(cleanModel)
+        ) {
+            return "$activeEntityHint - $cleanModel".trim()
+        }
+        return cleanModel
+    }
+
+    private fun isVagueFollowUpQuery(query: String): Boolean {
+        val clean = query.trim().lowercase()
+        if (clean.length > 40) return false
+        val tokens = listOf(
+            "سعره", "كم سعره", "بكم", "لونه", "لون ", "مقاسه", "مقاس ",
+            "متوفر", "موجود", "تفاصيله", "مواصفاته", "أبيض", "اسود", "أسود",
+            "رجالي", "نسائي", "price", "color", "size", "available"
+        )
+        return tokens.any { clean.contains(it) }
+    }
+
+    private fun normalizeToolKey(raw: String): String =
+        raw.trim().lowercase().replace(Regex("""[\s؟?!.,،]+"""), " ").trim()
 
     companion object {
         const val MAX_TOOL_ROUNDS = 2

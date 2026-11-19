@@ -105,20 +105,29 @@ class TestReplyViewModel internal constructor(
             val parts = buildList {
                 if (settings.isDrivingModeEnabled) add("القيادة")
                 add("القوائم")
-                add("القواعد")
+                if (ai.useKeywordRules) add("القواعد")
                 if (ai.enabled) {
-                    if (ai.primaryBaseUrl.isNotBlank()) add("New API") else add("AI")
+                    add(ai.provider.labelAr)
                     if (ai.fallbackEnabled) add(ai.effectiveOllamaModel())
+                    add("${ai.responseTone.labelAr}/${ai.responseLength.labelAr}")
                 }
                 if (server?.isEnabled == true) {
-                    if (ai.enabled && server.effectiveWebhookMode() == com.example.data.local.entity.WebhookMode.AI_TOOL) {
+                    if (ai.enabled && ai.webhookToolEnabled &&
+                        server.effectiveWebhookMode() == com.example.data.local.entity.WebhookMode.AI_TOOL
+                    ) {
                         add("أداة: Webhook")
-                    } else if (!ai.enabled && server.effectiveWebhookMode() == com.example.data.local.entity.WebhookMode.STANDALONE_FALLBACK) {
+                    } else if (!ai.enabled &&
+                        server.effectiveWebhookMode() == com.example.data.local.entity.WebhookMode.STANDALONE_FALLBACK
+                    ) {
                         add("Webhook")
                     }
                 }
                 if (smartAdvisorPrefs.enabled) {
-                    add(if (ai.enabled) "أداة: Smart Advisor" else "Smart Advisor")
+                    if (ai.enabled && ai.saCollaborationEnabled) {
+                        add("أداة: Smart Advisor")
+                    } else if (!ai.enabled) {
+                        add("Smart Advisor")
+                    }
                 }
             }
             _uiState.update {

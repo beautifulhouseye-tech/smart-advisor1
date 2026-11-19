@@ -95,26 +95,43 @@ class ConversationMemoryManager(
         val updatedConsent = detectConsentSignal(cleanText, current.consentGranted)
         val consentTimestamp = if (updatedConsent != current.consentGranted) now else current.consentUpdatedAt
 
-        val detectedTopic = detectTopicCategory(cleanText)
-        val topicShifted = detectedTopic.isNotBlank() &&
+        val detectedTopicInfo = detectTopicWithCategory(cleanText)
+        val detectedTopic = detectedTopicInfo?.first.orEmpty()
+        val detectedIsProductTopic = detectedTopicInfo?.second == true
+        val currentIsProductTopic = isProductTopic(current.currentTopic) || current.lastProductDiscussed.isNotBlank()
+
+        val productTopicShifted = detectedIsProductTopic &&
             current.currentTopic.isNotBlank() &&
+            isProductTopic(current.currentTopic) &&
             detectedTopic != current.currentTopic
 
+        val extractedProduct = extractProductHint(cleanText, detectedTopicInfo)
+        val extractedPrefs = extractTemporaryPreferences(cleanText)
+
         val newTopic = when {
+            detectedIsProductTopic -> detectedTopic
+            currentIsProductTopic -> current.currentTopic
             detectedTopic.isNotBlank() -> detectedTopic
+            extractedProduct.isNotBlank() -> TOPIC_PRODUCT_GENERAL
             else -> current.currentTopic
         }
-        val newProduct = if (topicShifted) "" else extractProductHint(cleanText).ifBlank { current.lastProductDiscussed }
-        val newTempPrefs = if (topicShifted) {
-            extractTemporaryPreferences(cleanText)
+
+        val newProduct = when {
+            productTopicShifted -> extractedProduct
+            extractedProduct.isNotBlank() -> extractedProduct
+            else -> refineProductWithFollowUp(current.lastProductDiscussed, cleanText, extractedPrefs)
+        }
+
+        val newTempPrefs = if (productTopicShifted) {
+            extractedPrefs
         } else {
-            (decodeStringList(current.temporaryPreferencesJson) + extractTemporaryPreferences(cleanText))
+            (decodeStringList(current.temporaryPreferencesJson) + extractedPrefs)
                 .distinct()
-                .takeLast(6)
+                .takeLast(8)
         }
         val newUnanswered = if (cleanText.contains("؟") || cleanText.contains("?")) {
             (decodeStringList(current.unansweredQuestionsJson) + cleanText).distinct().takeLast(3)
-        } else if (topicShifted) {
+        } else if (productTopicShifted) {
             emptyList()
         } else {
             decodeStringList(current.unansweredQuestionsJson)
@@ -280,12 +297,16 @@ class ConversationMemoryManager(
     fun buildContextSummaryBlock(context: ConversationContextEntity): String {
         val tempPrefs = decodeStringList(context.temporaryPreferencesJson)
         val unanswered = decodeStringList(context.unansweredQuestionsJson)
+        val activeEntity = resolveActiveEntityHint(context)
         return buildString {
             if (context.currentTopic.isNotBlank()) {
                 append("الموضوع الحالي: ").append(context.currentTopic).append('\n')
             }
             if (context.lastProductDiscussed.isNotBlank()) {
                 append("آخر منتج نوقش: ").append(context.lastProductDiscussed).append('\n')
+            }
+            if (activeEntity.isNotBlank() && activeEntity != context.lastProductDiscussed) {
+                append("الكيان النشط في الحوار: ").append(activeEntity).append('\n')
             }
             if (tempPrefs.isNotEmpty()) {
                 append("تفضيلات الجلسة المؤقتة: ").append(tempPrefs.joinToString("، ")).append('\n')
@@ -297,6 +318,14 @@ class ConversationMemoryManager(
                 append("ملخص دائم للعميل: ").append(context.lastSyncedSummary).append('\n')
             }
         }.trim()
+    }
+
+    fun resolveActiveEntityHint(context: ConversationContextEntity): String {
+        val base = context.lastProductDiscussed.trim()
+        if (base.isBlank()) return ""
+        val prefs = decodeStringList(context.temporaryPreferencesJson)
+            .filter { p -> p.isNotBlank() && !base.contains(p, ignoreCase = true) }
+        return if (prefs.isEmpty()) base else "$base (${prefs.joinToString("، ")})"
     }
 
     fun clearSandboxConversation(conversationKey: String) {
@@ -351,35 +380,107 @@ class ConversationMemoryManager(
     }
 
     companion object {
-        private val TOPIC_KEYWORDS: List<Pair<String, List<String>>> = listOf(
-            "عطور" to listOf("عطر", "عطور", "عود", "مسك", "فواح", "perfume"),
-            "أحذية" to listOf("حذاء", "أحذية", "احذية", "جزمة", "سنيكرز", "كوتشي", "shoe"),
-            "ملابس" to listOf("ثوب", "قميص", "جاكيت", "ملابس", "فستان", "تيشيرت"),
-            "إلكترونيات" to listOf("جوال", "هاتف", "لابتوب", "سماعة", "ساعة ذكية", "شاحن"),
-            "ساعات" to listOf("ساعة", "ساعات", "watch"),
-            "الشحن والتوصيل" to listOf("شحن", "توصيل", "شركة الشحن", "مدة التوصيل"),
-            "الاسترجاع والاستبدال" to listOf("استرجاع", "استبدال", "ارجاع", "مرتجع"),
-            "العروض والخصومات" to listOf("عرض", "عروض", "خصم", "تخفيض", "كوبون"),
-            "الحساب والدخول" to listOf("تسجيل", "حسابي", "رابط دخول", "دخول")
+        private const val TOPIC_PRODUCT_GENERAL = "استفسار منتج"
+
+        // Triple: (topicName, isProductCatalogDomain, keywords)
+        private val TOPIC_CATALOG_ENTRIES: List<Triple<String, Boolean, List<String>>> = listOf(
+            Triple("عطور", true, listOf("عطر", "عطور", "عود", "مسك", "فواح", "perfume")),
+            Triple("أجهزة المطبخ", true, listOf("خلاط", "عصارة", "مطحنة", "غلاية", "مقلاة", "مايكرويف", "مطبخ", "blender", "mixer", "coffee maker")),
+            Triple("أحذية", true, listOf("حذاء", "أحذية", "احذية", "جزمة", "سنيكرز", "كوتشي", "shoe")),
+            Triple("ملابس", true, listOf("ثوب", "قميص", "جاكيت", "ملابس", "فستان", "تيشيرت")),
+            Triple("إلكترونيات", true, listOf("جوال", "هاتف", "لابتوب", "سماعة", "ساعة ذكية", "شاحن", "كاميرا")),
+            Triple("ساعات", true, listOf("ساعة", "ساعات", "watch")),
+            Triple("العناية والتجميل", true, listOf("كريم", "سيروم", "شامبو", "تجميل", "بشرة")),
+            Triple("الأثاث والمنزل", true, listOf("طاولة", "كرسي", "مفرش", "أثاث", "مصباح")),
+            Triple("الشحن والتوصيل", false, listOf("شحن", "توصيل", "شركة الشحن", "مدة التوصيل")),
+            Triple("الاسترجاع والاستبدال", false, listOf("استرجاع", "استبدال", "ارجاع", "مرتجع")),
+            Triple("العروض والخصومات", false, listOf("عرض", "عروض", "خصم", "تخفيض", "كوبون")),
+            Triple("الحساب والدخول", false, listOf("تسجيل", "حسابي", "رابط دخول", "دخول"))
         )
 
         private val PREF_KEYWORDS = listOf(
-            "رجالي", "نسائي", "أطفالي", "رياضي", "رسمي", "أسود", "أبيض", "أزرق",
-            "سريع", "اقتصادي", "فاخر", "عود", "فواح", "جلد"
+            "رجالي", "نسائي", "أطفالي", "رياضي", "رسمي",
+            "أسود", "اسود", "أبيض", "ابيض", "أزرق", "ازرق", "أحمر", "احمر", "ذهبي", "فضي",
+            "سريع", "اقتصادي", "بسعر مناسب", "رخيص", "فاخر", "عود", "فواح", "جلد", "مناسب"
+        )
+
+        private val ATTRIBUTE_ONLY_WORDS = setOf(
+            "رجالي", "نسائي", "أطفالي", "رياضي", "رسمي",
+            "أسود", "اسود", "أبيض", "ابيض", "أزرق", "ازرق", "أحمر", "احمر", "ذهبي", "فضي"
+        )
+
+        private val PRODUCT_INTENT_PREFIX_REGEX = Regex(
+            """^(?:أبحث عن|ابحث عن|أريد|اريد|أبي|ابي|ابغى|أبغى|عندكم|هل يوجد|بكم|كم سعر)\s+(.+)$"""
+        )
+
+        private val NON_PRODUCT_FOLLOWUPS = setOf(
+            "كم سعره", "كم سعره؟", "كم السعر", "كم السعر؟", "بكم", "بكم؟",
+            "هل متوفر", "هل متوفر؟", "السعر", "التوصيل", "الشحن"
         )
 
         fun detectTopicCategory(text: String): String {
-            val lower = text.lowercase()
-            return TOPIC_KEYWORDS.firstOrNull { (_, keywords) ->
-                keywords.any { kw -> lower.contains(kw) }
-            }?.first.orEmpty()
+            return detectTopicWithCategory(text)?.first.orEmpty()
         }
 
-        private fun extractProductHint(text: String): String {
+        private fun detectTopicWithCategory(text: String): Pair<String, Boolean>? {
+            val lower = text.lowercase()
+            val hit = TOPIC_CATALOG_ENTRIES.firstOrNull { (_, _, keywords) ->
+                keywords.any { kw -> lower.contains(kw) }
+            } ?: return null
+            return hit.first to hit.second
+        }
+
+        private fun isProductTopic(topic: String): Boolean {
+            if (topic == TOPIC_PRODUCT_GENERAL) return true
+            return TOPIC_CATALOG_ENTRIES.any { it.first == topic && it.second }
+        }
+
+        private fun extractProductHint(text: String, topicInfo: Pair<String, Boolean>?): String {
             val clean = text.trim()
-            val topic = detectTopicCategory(clean)
-            if (topic.isBlank() || clean.length > 60) return ""
-            return clean
+            if (clean.isEmpty() || clean.length > 70) return ""
+            val normLower = clean.lowercase()
+            if (normLower in NON_PRODUCT_FOLLOWUPS) return ""
+            if (clean.contains("بسعر مناسب") || clean.startsWith("هل يوجد لون") || clean.startsWith("أريده")) {
+                if (topicInfo?.second != true) return ""
+            }
+            if (topicInfo != null && topicInfo.second) {
+                return PRODUCT_INTENT_PREFIX_REGEX.find(clean)?.groupValues?.getOrNull(1)?.trim()
+                    ?.takeIf { it.isNotBlank() } ?: clean
+            }
+            // Dynamic product noun extraction for arbitrary catalog queries ("أبحث عن خلاط للمطبخ")
+            if (topicInfo == null) {
+                val match = PRODUCT_INTENT_PREFIX_REGEX.find(clean)
+                val extracted = match?.groupValues?.getOrNull(1)?.trim().orEmpty()
+                if (extracted.length in 2..45 && !extracted.startsWith("سعره")) {
+                    return extracted
+                }
+            }
+            return ""
+        }
+
+        private fun refineProductWithFollowUp(
+            previousProduct: String,
+            currentText: String,
+            extractedPrefs: List<String>
+        ): String {
+            if (previousProduct.isBlank()) return ""
+            val clean = currentText.trim().trimEnd('؟', '?', '.', '!')
+            // If customer replies with a short attribute modifier (e.g. "رجالي" after "أريد عطر"),
+            // refine "عطر" -> "عطر رجالي" cleanly without discarding the base product!
+            if (clean.length <= 24 && ATTRIBUTE_ONLY_WORDS.any { clean.equals(it, ignoreCase = true) }) {
+                return if (previousProduct.contains(clean, ignoreCase = true)) {
+                    previousProduct
+                } else {
+                    "$previousProduct $clean".trim()
+                }
+            }
+            if (extractedPrefs.size == 1 && clean.split(Regex("\\s+")).size <= 2) {
+                val pref = extractedPrefs.first()
+                if (pref in ATTRIBUTE_ONLY_WORDS && !previousProduct.contains(pref, ignoreCase = true)) {
+                    return "$previousProduct $pref".trim()
+                }
+            }
+            return previousProduct
         }
 
         private val SIZE_REGEX = Regex("""(?i)(?:مقاس|size)\s*[:\-]?\s*\d{1,3}""")

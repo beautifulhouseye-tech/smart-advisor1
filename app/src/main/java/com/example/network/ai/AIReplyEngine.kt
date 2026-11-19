@@ -2,6 +2,7 @@ package com.example.network.ai
 
 import com.example.data.preferences.AiSettingsPrefs
 import com.example.data.preferences.AiSettingsState
+import com.example.data.preferences.ResponseLength
 import com.example.network.HttpTransport
 import com.example.network.security.SecretVault
 import com.example.network.security.SensitiveDataRedactor
@@ -326,8 +327,8 @@ class AIReplyEngine @Inject constructor(
         userMessage: String
     ): RawTurnCallResult {
         if (!useFallbackEngine) {
-            return when {
-                settings.provider == Provider.NEW_API || settings.primaryBaseUrl.isNotBlank() -> {
+            return when (settings.provider) {
+                Provider.NEW_API -> {
                     val baseUrl = settings.primaryBaseUrl.trim()
                     val urlCheck = validateExternalUrl(baseUrl, "/v1/chat/completions")
                     if (urlCheck !is UrlValidationResult.Valid) {
@@ -351,7 +352,7 @@ class AIReplyEngine @Inject constructor(
                         requireApiKey = true
                     )
                 }
-                settings.provider == Provider.OPENAI -> {
+                Provider.OPENAI -> {
                     val apiKey = vault.get(AiSettingsPrefs.apiKeyRefFor(Provider.OPENAI)).trim()
                     if (apiKey.isBlank()) {
                         return RawTurnCallResult(error = "مفتاح OpenAI غير مهيأ في SecretVault")
@@ -368,13 +369,13 @@ class AIReplyEngine @Inject constructor(
                         requireApiKey = true
                     )
                 }
-                settings.provider == Provider.GEMINI -> {
+                Provider.GEMINI -> {
                     val apiKey = vault.get(AiSettingsPrefs.apiKeyRefFor(Provider.GEMINI)).trim()
                     if (apiKey.isBlank()) {
                         return RawTurnCallResult(error = "مفتاح Gemini غير مهيأ في SecretVault")
                     }
                     val contextSummary = recentTurns.joinToString("\n") { "${it.role}: ${it.text}" }
-                    val reply = callGemini(
+                    callGeminiDetailed(
                         msg = userMessage,
                         config = AIConfig(
                             provider = Provider.GEMINI,
@@ -386,14 +387,8 @@ class AIReplyEngine @Inject constructor(
                         ),
                         ctx = contextSummary
                     )
-                    if (reply.isNullOrBlank()) {
-                        RawTurnCallResult(error = "فشل استدعاء Gemini")
-                    } else {
-                        RawTurnCallResult(text = reply, statusCode = 200)
-                    }
                 }
-                else -> {
-                    // Explicit OLLAMA selected as primary -> uses ollamaBaseUrl
+                Provider.OLLAMA -> {
                     executeOllamaCall(settings, systemInstruction, recentTurns, userMessage)
                 }
             }
@@ -476,9 +471,8 @@ class AIReplyEngine @Inject constructor(
     }
 
     private fun resolvePrimaryEngineLabel(settings: AiSettingsState): String {
-        return when {
-            settings.provider == Provider.NEW_API || settings.primaryBaseUrl.isNotBlank() ->
-                "New API (${settings.effectivePrimaryModel()})"
+        return when (settings.provider) {
+            Provider.NEW_API -> "New API (${settings.effectivePrimaryModel()})"
             else -> "${settings.provider.labelAr} (${settings.effectivePrimaryModel()})"
         }
     }
@@ -734,8 +728,12 @@ class AIReplyEngine @Inject constructor(
     }
 
     private suspend fun callGemini(msg: String, config: AIConfig, ctx: String): String? {
+        return callGeminiDetailed(msg, config, ctx).text
+    }
+
+    private suspend fun callGeminiDetailed(msg: String, config: AIConfig, ctx: String): RawTurnCallResult {
         val apiKey = resolveApiKey(config)
-        if (apiKey.isBlank()) return null
+        if (apiKey.isBlank()) return RawTurnCallResult(error = "مفتاح Gemini غير مهيأ")
 
         val model = config.model.ifBlank { "gemini-1.5-pro" }
         val combinedPrompt = buildString {
@@ -768,17 +766,35 @@ class AIReplyEngine @Inject constructor(
         }.toString()
 
         val url = "https://generativelanguage.googleapis.com/v1beta/models/$model:generateContent?key=$apiKey"
-        val result = transport.execute(
-            url = url,
-            method = "POST",
-            body = payload,
-            contentType = "JSON",
-            maxAttempts = 1,
-            timeoutSeconds = HttpTransport.DEFAULT_TIMEOUT_SECONDS
-        )
-
-        if (result !is HttpTransport.Result.Success) return null
-        return parseGeminiResponse(result.body)
+        return when (
+            val result = transport.execute(
+                url = url,
+                method = "POST",
+                body = payload,
+                contentType = "JSON",
+                maxAttempts = 1,
+                timeoutSeconds = HttpTransport.DEFAULT_TIMEOUT_SECONDS
+            )
+        ) {
+            is HttpTransport.Result.Success -> {
+                val parsed = parseGeminiResponse(result.body)
+                if (parsed.isNullOrBlank()) {
+                    RawTurnCallResult(statusCode = result.code, latencyMs = result.ms, error = "استجابة Gemini فارغة")
+                } else {
+                    RawTurnCallResult(text = parsed, statusCode = result.code, latencyMs = result.ms)
+                }
+            }
+            is HttpTransport.Result.Conflict -> RawTurnCallResult(
+                statusCode = result.code,
+                latencyMs = result.ms,
+                error = "تعارض من خادم Gemini (HTTP 409)"
+            )
+            is HttpTransport.Result.Failure -> RawTurnCallResult(
+                statusCode = result.code,
+                latencyMs = result.ms,
+                error = redactError(result.error)
+            )
+        }
     }
 
     private fun isUsableDecision(decision: AiStructuredDecision): Boolean =
@@ -1009,6 +1025,72 @@ class AIReplyEngine @Inject constructor(
                 host == "0.0.0.0" ||
                 host == "::1" ||
                 host == "10.0.2.2"
+        }
+
+        fun enforceToneAndLength(rawReply: String, settings: AiSettingsState): String {
+            val normalized = rawReply
+                .replace(Regex("\n{3,}"), "\n\n")
+                .trim()
+            if (normalized.isEmpty()) return ""
+
+            // Preserve ephemeral magic login / verification URLs intact without mid-URL slicing
+            val hasUrl = normalized.contains("https://", ignoreCase = true) ||
+                normalized.contains("http://", ignoreCase = true)
+
+            val lengthCeiling = when (settings.responseLength) {
+                ResponseLength.VERY_SHORT -> minOf(settings.effectiveMaxReplyChars(), ResponseLength.VERY_SHORT.defaultMaxChars)
+                ResponseLength.SHORT -> minOf(settings.effectiveMaxReplyChars(), maxOf(settings.effectiveMaxReplyChars(), ResponseLength.SHORT.defaultMaxChars))
+                ResponseLength.MEDIUM, ResponseLength.DETAILED -> settings.effectiveMaxReplyChars()
+            }
+
+            var candidate = normalized
+            if (settings.responseLength == ResponseLength.VERY_SHORT && !hasUrl) {
+                val sentences = splitSentencesPreservingContent(candidate)
+                if (sentences.size > ResponseLength.VERY_SHORT.maxSentencesHint) {
+                    candidate = sentences.take(ResponseLength.VERY_SHORT.maxSentencesHint).joinToString(" ").trim()
+                }
+            }
+
+            if (candidate.length <= lengthCeiling) {
+                return candidate
+            }
+
+            if (hasUrl) {
+                // Keep URL intact if trimming would slice inside the URL token
+                val urlMatch = Regex("""https?://\S+""").find(candidate)
+                if (urlMatch != null && urlMatch.range.last >= lengthCeiling) {
+                    return candidate
+                }
+            }
+
+            val sentences = splitSentencesPreservingContent(candidate)
+            if (sentences.size > 1) {
+                val acc = StringBuilder()
+                for (sentence in sentences) {
+                    val next = if (acc.isEmpty()) sentence else "${acc} $sentence"
+                    if (next.length <= lengthCeiling) {
+                        acc.clear()
+                        acc.append(next)
+                    } else {
+                        break
+                    }
+                }
+                if (acc.isNotEmpty()) {
+                    return acc.toString().trim()
+                }
+            }
+
+            val hardSlice = candidate.take((lengthCeiling - 1).coerceAtLeast(20))
+            val lastSpace = hardSlice.lastIndexOf(' ')
+            val cleanSlice = if (lastSpace > lengthCeiling / 2) hardSlice.substring(0, lastSpace) else hardSlice
+            return "${cleanSlice.trimEnd('.', '،', ',', ' ')}…"
+        }
+
+        private fun splitSentencesPreservingContent(text: String): List<String> {
+            val parts = text.split(Regex("""(?<=[.!?؟])\s+|\n+"""))
+                .map { it.trim() }
+                .filter { it.isNotEmpty() }
+            return if (parts.isEmpty()) listOf(text) else parts
         }
     }
 }

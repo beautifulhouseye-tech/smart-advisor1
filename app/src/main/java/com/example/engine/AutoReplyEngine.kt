@@ -57,7 +57,7 @@ sealed class LocalOutcome {
 }
 
 @Singleton
-class AutoReplyEngine @Inject constructor(
+class AutoReplyEngine internal constructor(
     private val repository: AutoMateRepository,
     private val pendingReplyCoordinator: PendingReplyCoordinator,
     private val menuReplyManager: MenuReplyManager,
@@ -67,8 +67,63 @@ class AutoReplyEngine @Inject constructor(
     private val secretVault: SecretVault,
     private val replyDispatcher: ReplyDispatcher,
     private val conversationMemoryManager: ConversationMemoryManager? = null,
-    private val smartCollaborationCoordinator: SmartCollaborationCoordinator? = null
+    private val smartCollaborationCoordinator: SmartCollaborationCoordinator? = null,
+    private val injectedUnifiedService: UnifiedSmartReplyService? = null,
+    private val clockMs: () -> Long = { System.currentTimeMillis() }
 ) {
+    @Inject
+    constructor(
+        repository: AutoMateRepository,
+        pendingReplyCoordinator: PendingReplyCoordinator,
+        menuReplyManager: MenuReplyManager,
+        followUpScheduler: FollowUpScheduler,
+        aiSettingsPrefs: AiSettingsPrefs,
+        aiReplyEngine: AIReplyEngine,
+        secretVault: SecretVault,
+        replyDispatcher: ReplyDispatcher,
+        conversationMemoryManager: ConversationMemoryManager,
+        smartCollaborationCoordinator: SmartCollaborationCoordinator,
+        unifiedSmartReplyService: UnifiedSmartReplyService
+    ) : this(
+        repository = repository,
+        pendingReplyCoordinator = pendingReplyCoordinator,
+        menuReplyManager = menuReplyManager,
+        followUpScheduler = followUpScheduler,
+        aiSettingsPrefs = aiSettingsPrefs,
+        aiReplyEngine = aiReplyEngine,
+        secretVault = secretVault,
+        replyDispatcher = replyDispatcher,
+        conversationMemoryManager = conversationMemoryManager,
+        smartCollaborationCoordinator = smartCollaborationCoordinator,
+        injectedUnifiedService = unifiedSmartReplyService,
+        clockMs = { System.currentTimeMillis() }
+    )
+
+    constructor(
+        repository: AutoMateRepository,
+        pendingReplyCoordinator: PendingReplyCoordinator,
+        menuReplyManager: MenuReplyManager,
+        followUpScheduler: FollowUpScheduler,
+        aiSettingsPrefs: AiSettingsPrefs,
+        aiReplyEngine: AIReplyEngine,
+        secretVault: SecretVault,
+        replyDispatcher: ReplyDispatcher,
+        conversationMemoryManager: ConversationMemoryManager? = null,
+        smartCollaborationCoordinator: SmartCollaborationCoordinator? = null
+    ) : this(
+        repository = repository,
+        pendingReplyCoordinator = pendingReplyCoordinator,
+        menuReplyManager = menuReplyManager,
+        followUpScheduler = followUpScheduler,
+        aiSettingsPrefs = aiSettingsPrefs,
+        aiReplyEngine = aiReplyEngine,
+        secretVault = secretVault,
+        replyDispatcher = replyDispatcher,
+        conversationMemoryManager = conversationMemoryManager,
+        smartCollaborationCoordinator = smartCollaborationCoordinator,
+        injectedUnifiedService = null
+    )
+
     constructor(
         repository: AutoMateRepository,
         pendingReplyCoordinator: PendingReplyCoordinator,
@@ -88,8 +143,25 @@ class AutoReplyEngine @Inject constructor(
         secretVault = secretVault,
         replyDispatcher = replyDispatcher,
         conversationMemoryManager = null,
-        smartCollaborationCoordinator = null
+        smartCollaborationCoordinator = null,
+        injectedUnifiedService = null
     )
+
+    private val unifiedService: UnifiedSmartReplyService by lazy {
+        injectedUnifiedService ?: UnifiedSmartReplyService(
+            repository = repository,
+            menuReplyManager = menuReplyManager,
+            aiSettingsPrefs = aiSettingsPrefs,
+            aiReplyEngine = aiReplyEngine,
+            secretVault = secretVault,
+            serverRepo = null,
+            webhookClient = null,
+            smartAdvisorClient = null,
+            smartAdvisorPrefs = null,
+            conversationMemoryManager = conversationMemoryManager,
+            smartCollaborationCoordinator = smartCollaborationCoordinator
+        )
+    }
 
     private val engineScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     private val lastReplyTimestamps = ConcurrentHashMap<String, Long>()
@@ -114,7 +186,9 @@ class AutoReplyEngine @Inject constructor(
         val aiSettings = aiSettingsPrefs.current()
 
         if (!skipPreChecks) {
-            if (!isLocalActive) return LocalOutcome.BlockedDisabled
+            if (!isLocalActive && !(aiSettings.enabled && incoming.packageName in settings.enabledPackages)) {
+                return LocalOutcome.BlockedDisabled
+            }
             if (incoming.isGroup && !settings.replyInGroups) return LocalOutcome.BlockedPolicy
             if (!isContactAllowed(incoming.senderName, settings.contactFilterMode)) {
                 return LocalOutcome.BlockedPolicy
@@ -142,113 +216,37 @@ class AutoReplyEngine @Inject constructor(
         )
         val now = System.currentTimeMillis()
 
-        // Ordered decision chain:
-        // 1. Driving Mode
-        // 2. Interactive Menus
-        // 3. Explicit Local Rules (excluding wildcard "*")
-        // 4. Smart Collaboration (New API -> Ollama/Qwen -> Smart Advisor 6.5.0)
-        // 5. Wildcard Rule "*" (local fallback only after AI)
-        // 6. Explicit Safe Fallback Reply (if AI configured one)
-        var matchedRule: ReplyRuleEntity? = null
-        var replyToSend: String? = null
-        var sourceCategoryLabel = ""
-        var usedSmartCollab = false
-
-        if (settings.isDrivingModeEnabled) {
-            replyToSend = settings.drivingModeReplyText.takeIf { it.isNotBlank() }
-            sourceCategoryLabel = ReplySourceCategory.DRIVING_MODE.name
-        } else {
-            val menuReply = menuReplyManager.processConversationMessage(senderKey, incoming.messageText)
-            if (!menuReply.isNullOrBlank()) {
-                replyToSend = menuReply
-                sourceCategoryLabel = ReplySourceCategory.MENU_REPLY.name
-            } else {
-                val rules = repository.getEnabledRulesOnce()
-                val specificRules = rules.filter { it.keyword.trim() != "*" }
-                val matchedSpecific = RuleMatcher.findBestMatch(incoming.messageText, specificRules)
-                if (matchedSpecific != null) {
-                    matchedRule = matchedSpecific
-                    sourceCategoryLabel = ReplySourceCategory.LOCAL_RULE.name
-                } else {
-                    if (aiSettings.enabled) {
-                        if (smartCollaborationCoordinator != null) {
-                            usedSmartCollab = true
-                            val collab = smartCollaborationCoordinator.collaborate(
-                                SmartCollaborationCoordinator.CollaborationInput(
-                                    packageName = incoming.packageName,
-                                    senderName = incoming.senderName,
-                                    rawTitle = incoming.rawTitle,
-                                    phone = incoming.phone,
-                                    groupName = incoming.groupName,
-                                    isGroup = incoming.isGroup,
-                                    messageText = incoming.messageText,
-                                    isSandbox = false,
-                                    conversationKeyOverride = conversationKey,
-                                    messageId = incoming.msgKey
-                                )
-                            )
-                            replyToSend = collab.replyText
-                            sourceCategoryLabel = if (collab.calledSmartAdvisor && !collab.calledWebhook) {
-                                ReplySourceCategory.SMART_ADVISOR.name
-                            } else {
-                                ReplySourceCategory.AI_ENGINE.name
-                            }
-                        } else {
-                            val apiKey = secretVault.get(AiSettingsPrefs.apiKeyRefFor(aiSettings.provider))
-                            val aiConfig = AIReplyEngine.AIConfig(
-                                provider = aiSettings.provider,
-                                apiKey = apiKey,
-                                model = aiSettings.effectivePrimaryModel(),
-                                systemPrompt = aiSettings.systemPrompt,
-                                temperature = aiSettings.temperature,
-                                maxTokens = aiSettings.maxTokens,
-                                baseUrl = aiSettings.primaryBaseUrl
-                            )
-                            replyToSend = aiReplyEngine.generateReplyWithFallback(
-                                message = incoming.messageText,
-                                primaryConfig = aiConfig,
-                                context = "المرسل: ${incoming.senderName}"
-                            )
-                            sourceCategoryLabel = ReplySourceCategory.AI_ENGINE.name
-                        }
-                    }
-
-                    if (replyToSend.isNullOrBlank()) {
-                        val fallbackRule = RuleMatcher.findBestMatch(incoming.messageText, rules)
-                        if (fallbackRule != null) {
-                            matchedRule = fallbackRule
-                            sourceCategoryLabel = ReplySourceCategory.WILDCARD_RULE.name
-                        }
-                    }
-
-                    if (matchedRule == null && replyToSend.isNullOrBlank() && aiSettings.enabled && aiSettings.safeFallbackReply.isNotBlank()) {
-                        replyToSend = aiSettings.safeFallbackReply
-                        sourceCategoryLabel = ReplySourceCategory.AI_ENGINE.name
-                    }
-                }
-            }
-        }
-
-        val resolvedRuleContent = matchedRule?.let { repository.resolveRuleContent(it) }
-        if (resolvedRuleContent != null) {
-            val variableMsg = IncomingMessage(
-                app = incoming.packageName,
-                sender = incoming.senderName,
+        val decision = unifiedService.resolve(
+            UnifiedSmartReplyService.Request(
+                packageName = incoming.packageName,
                 senderName = incoming.senderName,
-                message = incoming.messageText,
+                rawTitle = incoming.rawTitle,
                 phone = incoming.phone,
-                groupName = incoming.groupName.orEmpty(),
+                groupName = incoming.groupName,
                 isGroup = incoming.isGroup,
-                notificationId = incoming.msgKey,
-                timestamp = incoming.receivedAtMs
+                messageText = incoming.messageText,
+                msgKey = incoming.msgKey,
+                conversationKeyOverride = conversationKey,
+                isSandbox = false,
+                checkPolicy = !skipPreChecks,
+                includeExternalStandalone = false,
+                requireLocalActiveWhenCheckingPolicy = false,
+                receivedAtMs = incoming.receivedAtMs
             )
-            replyToSend = VariableEngine.resolveTemplate(resolvedRuleContent.replyText, variableMsg)
-        }
+        )
 
-        val ruleReplyType = resolvedRuleContent?.replyType ?: ReplyRuleEntity.REPLY_TYPE_TEXT
-        val ruleImageUri = resolvedRuleContent?.imageUri?.takeIf { it.isNotBlank() }
+        if (decision.blockedDisabled) return LocalOutcome.BlockedDisabled
+        if (decision.blockedPolicy) return LocalOutcome.BlockedPolicy
 
-        if (replyToSend.isNullOrBlank() && ruleImageUri == null) {
+        val matchedRule = decision.matchedRule
+        val resolvedRuleContent = decision.resolvedRuleContent
+        val replyToSend = decision.replyText.takeIf { it.isNotBlank() }
+        val sourceCategoryLabel = decision.sourceCategory.name
+        val usedSmartCollab = decision.usedSmartCollaboration
+        val ruleReplyType = decision.replyType
+        val ruleImageUri = decision.imageUri?.takeIf { it.isNotBlank() }
+
+        if (!decision.matched || (replyToSend.isNullOrBlank() && ruleImageUri == null)) {
             return LocalOutcome.NoMatch
         }
 

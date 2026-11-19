@@ -4,6 +4,8 @@ import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -21,6 +23,7 @@ import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.CloudDone
 import androidx.compose.material.icons.filled.Memory
 import androidx.compose.material.icons.filled.Psychology
+import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material.icons.filled.VisibilityOff
 import androidx.compose.material3.Button
@@ -31,6 +34,7 @@ import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.ExposedDropdownMenuBox
 import androidx.compose.material3.ExposedDropdownMenuDefaults
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -62,12 +66,15 @@ import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.data.preferences.AiSettingsState
+import com.example.data.preferences.ReplyLanguage
+import com.example.data.preferences.ResponseLength
+import com.example.data.preferences.ResponseTone
 import com.example.network.ai.AIReplyEngine
 import com.example.ui.viewmodel.AISettingsViewModel
 import java.util.Locale
 import kotlin.math.roundToInt
 
-@OptIn(ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
 fun AISettingsScreen(
     onBack: () -> Unit,
@@ -486,7 +493,132 @@ fun AISettingsScreen(
                     }
                 }
 
-                // 4. Smart Advisor Collaboration, Local Context Memory & Consent
+                // 4. Unified Style Controls: Tone, Length & Language
+                item {
+                    Card(
+                        modifier = Modifier.fillMaxWidth(),
+                        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
+                    ) {
+                        Column(
+                            modifier = Modifier.padding(16.dp),
+                            verticalArrangement = Arrangement.spacedBy(12.dp)
+                        ) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Filled.Tune,
+                                    contentDescription = null,
+                                    tint = MaterialTheme.colorScheme.primary
+                                )
+                                Text(
+                                    text = "نبرة الرد والطول واللغة (Unified Smart Reply)",
+                                    style = MaterialTheme.typography.titleMedium
+                                )
+                            }
+
+                            Text(
+                                text = "نبرة الرد",
+                                style = MaterialTheme.typography.labelLarge
+                            )
+                            FlowRow(
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                verticalArrangement = Arrangement.spacedBy(4.dp)
+                            ) {
+                                ResponseTone.entries.forEach { tone ->
+                                    FilterChip(
+                                        selected = state.responseTone == tone,
+                                        onClick = { viewModel.selectResponseTone(tone) },
+                                        label = { Text(tone.labelAr) },
+                                        modifier = Modifier
+                                            .minimumInteractiveComponentSize()
+                                            .testTag("ai_tone_chip_${tone.name}")
+                                    )
+                                }
+                            }
+
+                            if (state.responseTone == ResponseTone.CUSTOM) {
+                                OutlinedTextField(
+                                    value = state.customToneInstruction,
+                                    onValueChange = viewModel::updateCustomToneInstruction,
+                                    label = { Text("تعليمات النبرة المخصصة") },
+                                    placeholder = { Text("مثال: رد بلهجة سعودية دافئة ومهذبة") },
+                                    minLines = 2,
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .testTag("ai_custom_tone_input")
+                                )
+                            }
+
+                            Text(
+                                text = "طول الرد المستهدف",
+                                style = MaterialTheme.typography.labelLarge
+                            )
+                            FlowRow(
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                verticalArrangement = Arrangement.spacedBy(4.dp)
+                            ) {
+                                ResponseLength.entries.forEach { len ->
+                                    FilterChip(
+                                        selected = state.responseLength == len,
+                                        onClick = { viewModel.selectResponseLength(len) },
+                                        label = { Text("${len.labelAr} (~${len.defaultMaxChars})") },
+                                        modifier = Modifier
+                                            .minimumInteractiveComponentSize()
+                                            .testTag("ai_length_chip_${len.name}")
+                                    )
+                                }
+                            }
+
+                            OutlinedTextField(
+                                value = if (state.maxReplyLengthChars > 0) state.maxReplyLengthChars.toString() else "",
+                                onValueChange = viewModel::updateMaxReplyLengthChars,
+                                label = { Text("الحد الأقصى لطول الرد بالحروف (40 - 2000)") },
+                                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                                singleLine = true,
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .testTag("ai_max_reply_chars_input")
+                            )
+
+                            Text(
+                                text = "لغة الرد",
+                                style = MaterialTheme.typography.labelLarge
+                            )
+                            FlowRow(
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                verticalArrangement = Arrangement.spacedBy(4.dp)
+                            ) {
+                                ReplyLanguage.entries.forEach { lang ->
+                                    FilterChip(
+                                        selected = state.replyLanguage == lang,
+                                        onClick = { viewModel.selectReplyLanguage(lang) },
+                                        label = { Text(lang.labelAr) },
+                                        modifier = Modifier
+                                            .minimumInteractiveComponentSize()
+                                            .testTag("ai_language_chip_${lang.name}")
+                                    )
+                                }
+                            }
+
+                            if (state.replyLanguage == ReplyLanguage.CUSTOM) {
+                                OutlinedTextField(
+                                    value = state.customReplyLanguage,
+                                    onValueChange = viewModel::updateCustomReplyLanguage,
+                                    label = { Text("اسم اللغة المطلوبة") },
+                                    placeholder = { Text("مثال: الفرنسية أو الأردية") },
+                                    singleLine = true,
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .testTag("ai_custom_language_input")
+                                )
+                            }
+                        }
+                    }
+                }
+
+                // 5. Smart Advisor Collaboration, Local Context Memory & Consent
                 item {
                     Card(
                         modifier = Modifier.fillMaxWidth(),
@@ -511,19 +643,37 @@ fun AISettingsScreen(
                                 )
                             }
 
-                            Column {
-                                Text(
-                                    text = "نافذة سياق المحادثة المحلية: ${state.contextWindowPairs} أزواج رسائل (${state.contextWindowPairs * 2} رسالة)",
-                                    style = MaterialTheme.typography.labelLarge
-                                )
-                                Slider(
-                                    value = state.contextWindowPairs.toFloat(),
-                                    onValueChange = { viewModel.updateContextWindowPairs(it.roundToInt()) },
-                                    valueRange = 6f..8f,
-                                    steps = 1,
-                                    modifier = Modifier.testTag("ai_context_window_slider")
-                                )
+                            SettingSwitchRow(
+                                title = "تفعيل سياق المحادثة المتتابع",
+                                subtitle = "يحتفظ بسياق الحوار وآخر منتج نوقش للرد الدقيق على الأسئلة اللاحقة.",
+                                checked = state.useConversationContext,
+                                onCheckedChange = viewModel::setUseConversationContext,
+                                testTag = "ai_context_enabled_switch"
+                            )
+
+                            if (state.useConversationContext) {
+                                Column {
+                                    Text(
+                                        text = "نافذة سياق المحادثة المحلية: ${state.contextWindowPairs} أزواج رسائل (${state.contextWindowPairs * 2} رسالة)",
+                                        style = MaterialTheme.typography.labelLarge
+                                    )
+                                    Slider(
+                                        value = state.contextWindowPairs.toFloat(),
+                                        onValueChange = { viewModel.updateContextWindowPairs(it.roundToInt()) },
+                                        valueRange = 6f..8f,
+                                        steps = 1,
+                                        modifier = Modifier.testTag("ai_context_window_slider")
+                                    )
+                                }
                             }
+
+                            SettingSwitchRow(
+                                title = "تفعيل قواعد الكلمات المفتاحية ضمن المسار الموحد",
+                                subtitle = "تُفحص القواعد المخصصة قبل استدعاء الذكاء الاصطناعي، والقواعد غير الحاسمة تُمرر كسياق له.",
+                                checked = state.useKeywordRules,
+                                onCheckedChange = viewModel::setUseKeywordRules,
+                                testTag = "ai_keyword_rules_switch"
+                            )
 
                             SettingSwitchRow(
                                 title = "تفعيل استشارة Smart Advisor لبيانات المتجر",
@@ -531,6 +681,14 @@ fun AISettingsScreen(
                                 checked = state.saCollaborationEnabled,
                                 onCheckedChange = viewModel::setSaCollaborationEnabled,
                                 testTag = "ai_sa_collab_switch"
+                            )
+
+                            SettingSwitchRow(
+                                title = "السماح باستدعاء Webhook كأداة للمنسّق",
+                                subtitle = "يسمح للذكاء الاصطناعي بالاستعلام من الأنظمة الخارجية (ERP/CRM) عبر Webhook في وضع AI_TOOL.",
+                                checked = state.webhookToolEnabled,
+                                onCheckedChange = viewModel::setWebhookToolEnabled,
+                                testTag = "ai_webhook_tool_switch"
                             )
 
                             SettingSwitchRow(

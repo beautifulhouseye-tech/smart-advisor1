@@ -252,6 +252,7 @@ class SmartCollaborationTestSuiteTest {
         settingsDataStore.setDrivingModeEnabled(false)
         settingsDataStore.setReplyInGroups(false)
         settingsDataStore.setCooldownMinutes(0)
+        settingsDataStore.setUseAccessibilityFallback(true)
     }
 
     private fun configureCollaboration(

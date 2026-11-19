@@ -4,6 +4,9 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.data.preferences.AiSettingsPrefs
 import com.example.data.preferences.AiSettingsState
+import com.example.data.preferences.ReplyLanguage
+import com.example.data.preferences.ResponseLength
+import com.example.data.preferences.ResponseTone
 import com.example.network.ai.AIReplyEngine
 import com.example.network.security.SecretVault
 import dagger.hilt.android.lifecycle.HiltViewModel
@@ -35,6 +38,15 @@ data class AISettingsUiState(
     val systemPrompt: String = "",
     val temperature: Float = 0.7f,
     val maxTokens: Int = 150,
+    val responseTone: ResponseTone = ResponseTone.PROFESSIONAL,
+    val customToneInstruction: String = "",
+    val responseLength: ResponseLength = ResponseLength.SHORT,
+    val maxReplyLengthChars: Int = AiSettingsState.DEFAULT_MAX_REPLY_LENGTH_CHARS,
+    val replyLanguage: ReplyLanguage = ReplyLanguage.AUTO,
+    val customReplyLanguage: String = "",
+    val useConversationContext: Boolean = true,
+    val useKeywordRules: Boolean = true,
+    val webhookToolEnabled: Boolean = true,
     val isTesting: Boolean = false,
     val isTestingFallback: Boolean = false,
     val testResult: String? = null,
@@ -81,6 +93,15 @@ class AISettingsViewModel @Inject constructor(
             systemPrompt = current.systemPrompt,
             temperature = current.temperature,
             maxTokens = current.maxTokens,
+            responseTone = current.responseTone,
+            customToneInstruction = current.customToneInstruction,
+            responseLength = current.responseLength,
+            maxReplyLengthChars = current.maxReplyLengthChars,
+            replyLanguage = current.replyLanguage,
+            customReplyLanguage = current.customReplyLanguage,
+            useConversationContext = current.useConversationContext,
+            useKeywordRules = current.useKeywordRules,
+            webhookToolEnabled = current.webhookToolEnabled,
             lastPrimaryStatus = current.lastPrimaryStatus,
             lastFallbackStatus = current.lastFallbackStatus,
             lastErrorRedacted = current.lastErrorRedacted
@@ -186,6 +207,55 @@ class AISettingsViewModel @Inject constructor(
         _uiState.update { it.copy(systemPrompt = prompt) }
     }
 
+    fun selectResponseTone(tone: ResponseTone) {
+        _uiState.update { it.copy(responseTone = tone) }
+    }
+
+    fun updateCustomToneInstruction(instruction: String) {
+        _uiState.update { it.copy(customToneInstruction = instruction) }
+    }
+
+    fun selectResponseLength(length: ResponseLength) {
+        _uiState.update {
+            it.copy(
+                responseLength = length,
+                maxReplyLengthChars = length.defaultMaxChars
+            )
+        }
+    }
+
+    fun updateMaxReplyLengthChars(charsText: String) {
+        val digits = charsText.filter { it.isDigit() }
+        if (digits.isEmpty()) {
+            _uiState.update { it.copy(maxReplyLengthChars = 0) }
+            return
+        }
+        val parsed = digits.toIntOrNull() ?: return
+        _uiState.update {
+            it.copy(maxReplyLengthChars = parsed.coerceAtMost(AiSettingsState.MAX_REPLY_LENGTH_CHARS))
+        }
+    }
+
+    fun selectReplyLanguage(language: ReplyLanguage) {
+        _uiState.update { it.copy(replyLanguage = language) }
+    }
+
+    fun updateCustomReplyLanguage(language: String) {
+        _uiState.update { it.copy(customReplyLanguage = language) }
+    }
+
+    fun setUseConversationContext(enabled: Boolean) {
+        _uiState.update { it.copy(useConversationContext = enabled) }
+    }
+
+    fun setUseKeywordRules(enabled: Boolean) {
+        _uiState.update { it.copy(useKeywordRules = enabled) }
+    }
+
+    fun setWebhookToolEnabled(enabled: Boolean) {
+        _uiState.update { it.copy(webhookToolEnabled = enabled) }
+    }
+
     fun saveSettings() {
         val state = _uiState.value
         val keyRef = AiSettingsPrefs.apiKeyRefFor(state.provider)
@@ -211,7 +281,12 @@ class AISettingsViewModel @Inject constructor(
 
         val settingsState = buildSettingsState(state)
         aiSettingsPrefs.save(settingsState)
-        _uiState.update { it.copy(statusMessage = "تم حفظ إعدادات الذكاء الاصطناعي والتعاون الذكي") }
+        _uiState.update {
+            it.copy(
+                maxReplyLengthChars = settingsState.maxReplyLengthChars,
+                statusMessage = "تم حفظ إعدادات الذكاء الاصطناعي والتعاون الذكي"
+            )
+        }
     }
 
     fun testAiReply() {
@@ -277,6 +352,14 @@ class AISettingsViewModel @Inject constructor(
     }
 
     private fun buildSettingsState(state: AISettingsUiState): AiSettingsState {
+        val normalizedChars = if (state.maxReplyLengthChars <= 0) {
+            state.responseLength.defaultMaxChars
+        } else {
+            state.maxReplyLengthChars.coerceIn(
+                AiSettingsState.MIN_REPLY_LENGTH_CHARS,
+                AiSettingsState.MAX_REPLY_LENGTH_CHARS
+            )
+        }
         return AiSettingsState(
             enabled = state.enabled,
             provider = state.provider,
@@ -297,7 +380,16 @@ class AISettingsViewModel @Inject constructor(
             safeFallbackReply = state.safeFallbackReply,
             lastPrimaryStatus = state.lastPrimaryStatus,
             lastFallbackStatus = state.lastFallbackStatus,
-            lastErrorRedacted = state.lastErrorRedacted
+            lastErrorRedacted = state.lastErrorRedacted,
+            responseTone = state.responseTone,
+            customToneInstruction = state.customToneInstruction,
+            responseLength = state.responseLength,
+            maxReplyLengthChars = normalizedChars,
+            replyLanguage = state.replyLanguage,
+            customReplyLanguage = state.customReplyLanguage,
+            useConversationContext = state.useConversationContext,
+            useKeywordRules = state.useKeywordRules,
+            webhookToolEnabled = state.webhookToolEnabled
         )
     }
 
