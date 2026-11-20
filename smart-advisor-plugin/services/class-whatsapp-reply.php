@@ -192,6 +192,22 @@ class SA_WhatsApp_Reply {
             $message = mb_substr( $message, 0, 500, 'UTF-8' );
         }
 
+        // === DELIVERY_UNKNOWN GUARD (Prevent duplicate/blind re-processing on uncertain gateway ack) ===
+        $delivery_status = strtoupper( trim( (string) (
+            $request->get_param( 'delivery_status' )
+            ?: ( method_exists( $request, 'get_header' ) ? $request->get_header( 'X-SA-Delivery-Status' ) : '' )
+        ) ) );
+        if ( 'DELIVERY_UNKNOWN' === $delivery_status ) {
+            return self::build_rest_response( [
+                'reply'           => '',
+                'intent'          => 'DELIVERY_UNKNOWN',
+                'status'          => 'DELIVERY_UNKNOWN',
+                'skip_resend'     => true,
+                'delivery_unknown'=> true,
+                'context_updated' => false,
+            ], 200 );
+        }
+
         // === CENTRAL INBOX IDEMPOTENCY ===
         $identity = class_exists( 'SA_WhatsApp_Inbox' )
             ? SA_WhatsApp_Inbox::extract_identity( $request )
@@ -415,11 +431,13 @@ class SA_WhatsApp_Reply {
             $history = [];
             $known_context = [];
             $conversation_state = [];
+            $active_context = [];
 
             if ( is_array( $context ) && $config['memory_minutes'] > 0 ) {
                 $history = is_array( $context['history'] ?? null ) ? $context['history'] : [];
                 $known_context = is_array( $context['known_context'] ?? null ) ? $context['known_context'] : [];
                 $conversation_state = is_array( $context['conversation_state'] ?? null ) ? $context['conversation_state'] : [];
+                $active_context = is_array( $context['active_context'] ?? null ) ? $context['active_context'] : [];
 
                 if ( empty( $known_context['type'] ) ) {
                     $legacy_type = Service_Conversation_Analyzer::recover_type_from_history( $history );
@@ -428,6 +446,78 @@ class SA_WhatsApp_Reply {
                     }
                 }
             }
+
+            $orchestrator_mode = self::is_orchestrator_mode( $request );
+
+            // === CATEGORY INTENT & WOOCOMMERCE TAXONOMY LINK PIPELINE ===
+            if ( class_exists( 'SA_Category_Intent_Service' ) && SA_Category_Intent_Service::is_available() ) {
+                $effective_config = $config;
+                if ( empty( $effective_config['skills'] ) || ! is_array( $effective_config['skills'] ) ) {
+                    $effective_config['skills'] = [];
+                }
+                if ( ! self::global_skill_enabled( 'product_search' ) ) {
+                    $effective_config['skills']['product_search'] = 0;
+                }
+
+                $cat_result = SA_Category_Intent_Service::process_turn( $message, $active_context, $effective_config );
+                if ( is_array( $cat_result ) && ! empty( $cat_result['handled'] ) ) {
+                    $raw_reply      = (string) ( $cat_result['reply'] ?? '' );
+                    $formatted_reply = self::format_for_whatsapp( $raw_reply );
+                    $next_active    = is_array( $cat_result['active_context'] ?? null ) ? $cat_result['active_context'] : $active_context;
+
+                    if ( $config['memory_minutes'] > 0 ) {
+                        $last_ctx_msg_id = is_array( $context ) ? (string) ( $context['last_message_id'] ?? '' ) : '';
+                        if ( '' === $inbox_key || $last_ctx_msg_id !== $inbox_key ) {
+                            $new_history = $history;
+                            $new_history[] = [ 'role' => 'user', 'content' => $message ];
+                            $new_history[] = [ 'role' => 'assistant', 'content' => $formatted_reply ];
+
+                            $max_h = absint( $config['max_history'] ?? 4 );
+                            if ( count( $new_history ) > $max_h * 2 ) {
+                                $new_history = array_slice( $new_history, -( $max_h * 2 ) );
+                            }
+
+                            $synced_known = is_array( $next_active['filters'] ?? null ) ? $next_active['filters'] : [];
+                            if ( ! empty( $next_active['gender'] ) ) {
+                                $synced_known['gender'] = $next_active['gender'];
+                            }
+
+                            $new_context = [
+                                'history'            => $new_history,
+                                'known_context'      => [
+                                    'type'  => $next_active['product_type'] ?? null,
+                                    'known' => $synced_known,
+                                ],
+                                'conversation_state' => array_merge( $conversation_state, [
+                                    'last_product_ids' => (array) ( $next_active['last_product_ids'] ?? [] ),
+                                ] ),
+                                'active_context'     => $next_active,
+                                'last_message_id'    => $inbox_key,
+                            ];
+                            set_transient( $cache_key, $new_context, $config['memory_minutes'] * MINUTE_IN_SECONDS );
+                        }
+                    }
+
+                    $payload = [
+                        'reply'           => $orchestrator_mode ? '' : $formatted_reply,
+                        'intent'          => $cat_result['intent'],
+                        'category_id'     => $cat_result['category_id'],
+                        'category_name'   => $cat_result['category_name'],
+                        'category_url'    => $cat_result['category_url'],
+                        'product_type'    => $cat_result['product_type'],
+                        'gender'          => $cat_result['gender'],
+                        'filters'         => $cat_result['filters'],
+                        'context_updated' => (bool) $cat_result['context_updated'],
+                        'products'        => $cat_result['products'] ?? [],
+                    ];
+                    if ( $orchestrator_mode ) {
+                        $payload['suggested_reply']                = $formatted_reply;
+                        $payload['reply_deferred_to_orchestrator'] = true;
+                    }
+                    return $finish_complete( $payload, 200 );
+                }
+            }
+            // === END CATEGORY INTENT PIPELINE ===
 
             $analysis = Service_Conversation_Analyzer::analyze( $message, $history, $known_context, $conversation_state );
 
@@ -553,17 +643,41 @@ class SA_WhatsApp_Reply {
                         'history'            => $new_history,
                         'known_context'      => [ 'type' => $memory_type, 'known' => $memory_known ],
                         'conversation_state' => $analysis['conversation_state'] ?? $conversation_state,
+                        'active_context'     => $active_context,
                         'last_message_id'    => $inbox_key,
                     ];
                     set_transient( $cache_key, $new_context, $config['memory_minutes'] * MINUTE_IN_SECONDS );
                 }
             }
 
-            return $finish_complete( [ 'reply' => self::format_for_whatsapp( $reply ) ], 200 );
+            $final_reply = self::format_for_whatsapp( $reply );
+            $final_payload = [ 'reply' => $orchestrator_mode ? '' : $final_reply ];
+            if ( $orchestrator_mode ) {
+                $final_payload['suggested_reply']                = $final_reply;
+                $final_payload['reply_deferred_to_orchestrator'] = true;
+            }
+            return $finish_complete( $final_payload, 200 );
         } catch ( Throwable $e ) {
             error_log( '[Smart Advisor] WhatsApp reply error: ' . $e->getMessage() );
             return $finish_fail( 'RETRYABLE', $e->getMessage(), [ 'reply' => 'حدث خطأ مؤقت أثناء معالجة الرسالة.' ], 503, [ 'Retry-After' => 10 ] );
         }
+    }
+
+    private static function is_orchestrator_mode( $request ) {
+        if ( ! is_object( $request ) || ! method_exists( $request, 'get_param' ) ) {
+            return false;
+        }
+        $orch = $request->get_param( 'orchestrator' );
+        $suppress = $request->get_param( 'suppress_reply' );
+        $compose_mode = strtolower( trim( (string) $request->get_param( 'compose_mode' ) ) );
+        $reply_owner  = strtolower( trim( (string) $request->get_param( 'reply_owner' ) ) );
+        $header_owner = method_exists( $request, 'get_header' ) ? strtolower( trim( (string) $request->get_header( 'X-SA-Reply-Owner' ) ) ) : '';
+
+        return ! empty( $orch )
+            || ( null !== $suppress && filter_var( $suppress, FILTER_VALIDATE_BOOLEAN ) )
+            || 'structured_only' === $compose_mode
+            || 'automate_ai' === $reply_owner
+            || 'automate_ai' === $header_owner;
     }
 
     private static function format_for_whatsapp( $text ) {

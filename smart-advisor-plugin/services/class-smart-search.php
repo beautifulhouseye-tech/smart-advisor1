@@ -84,6 +84,408 @@ class Service_Smart_Search {
         return array_slice( $enriched, 0, $limit );
     }
 
+    /**
+     * Category-scoped structured product discovery for multi-turn conversational
+     * filters (category_id, gender, style, color, size, brand, budget_max, exclude_ids).
+     * Never breaks existing find() callers or legacy question-templates tests.
+     *
+     * @param array  $args
+     * @param string $query
+     * @param int    $limit
+     * @return array{products: array, exact_match: bool}
+     */
+    public static function find_with_category_filters( $args, $query = '', $limit = 15 ) {
+        if ( ! class_exists( 'WooCommerce' ) || ! function_exists( 'wc_get_product' ) ) {
+            return [ 'products' => [], 'exact_match' => false ];
+        }
+
+        $args        = is_array( $args ) ? $args : [];
+        $limit       = max( 1, min( 30, absint( $limit ) ) );
+        $category_id = absint( $args['category_id'] ?? 0 );
+        $type_slug   = trim( (string) ( $args['product_type'] ?? '' ) );
+        $gender      = trim( (string) ( $args['gender'] ?? '' ) );
+        $style       = trim( (string) ( $args['style'] ?? '' ) );
+        $color       = trim( (string) ( $args['color'] ?? '' ) );
+        $size        = trim( (string) ( $args['size'] ?? '' ) );
+        $brand       = trim( (string) ( $args['brand'] ?? '' ) );
+        $exclude_ids = array_values( array_filter( array_map( 'absint', (array) ( $args['exclude_ids'] ?? [] ) ) ) );
+
+        $ids = [];
+
+        if ( $category_id > 0 ) {
+            $post_args = [
+                'post_type'      => 'product',
+                'post_status'    => 'publish',
+                'posts_per_page' => 120,
+                'fields'         => 'ids',
+                'no_found_rows'  => true,
+                'orderby'        => 'date',
+                'order'          => 'DESC',
+                'tax_query'      => [
+                    [
+                        'taxonomy'         => 'product_cat',
+                        'field'            => 'term_id',
+                        'terms'            => [ $category_id ],
+                        'include_children' => true,
+                        'operator'         => 'IN',
+                    ],
+                ],
+            ];
+            if ( function_exists( 'get_posts' ) ) {
+                $ids = get_posts( $post_args );
+            }
+            if ( empty( $ids ) && function_exists( 'wc_get_products' ) && function_exists( 'get_term' ) ) {
+                $term = get_term( $category_id, 'product_cat' );
+                if ( is_object( $term ) && ! is_wp_error( $term ) && ! empty( $term->slug ) ) {
+                    $slugs = [ (string) $term->slug ];
+                    if ( function_exists( 'get_terms' ) ) {
+                        $children = get_terms( [
+                            'taxonomy'   => 'product_cat',
+                            'parent'     => $category_id,
+                            'hide_empty' => false,
+                        ] );
+                        if ( ! is_wp_error( $children ) && is_array( $children ) ) {
+                            foreach ( $children as $ch ) {
+                                if ( is_object( $ch ) && ! empty( $ch->slug ) ) {
+                                    $slugs[] = (string) $ch->slug;
+                                }
+                            }
+                        }
+                    }
+                    $ids = wc_get_products( [
+                        'status'       => 'publish',
+                        'limit'        => 120,
+                        'return'       => 'ids',
+                        'category'     => array_values( array_unique( $slugs ) ),
+                        'stock_status' => 'instock',
+                    ] );
+                }
+            }
+        } elseif ( '' !== $type_slug ) {
+            $term_ids = self::find_matching_term_ids( [ $type_slug ] );
+            if ( ! empty( $term_ids ) && function_exists( 'get_posts' ) ) {
+                $ids = get_posts( [
+                    'post_type'      => 'product',
+                    'post_status'    => 'publish',
+                    'posts_per_page' => 120,
+                    'fields'         => 'ids',
+                    'no_found_rows'  => true,
+                    'orderby'        => 'date',
+                    'order'          => 'DESC',
+                    'tax_query'      => [
+                        [
+                            'taxonomy'         => 'product_cat',
+                            'field'            => 'term_id',
+                            'terms'            => $term_ids,
+                            'include_children' => true,
+                            'operator'         => 'IN',
+                        ],
+                    ],
+                ] );
+            }
+        }
+
+        if ( empty( $ids ) ) {
+            return [ 'products' => [], 'exact_match' => false ];
+        }
+
+        $enriched = [];
+        foreach ( array_unique( array_map( 'absint', (array) $ids ) ) as $id ) {
+            if ( $id <= 0 || in_array( $id, $exclude_ids, true ) ) {
+                continue;
+            }
+            $wc = wc_get_product( $id );
+            if ( ! $wc ) {
+                continue;
+            }
+            $item = self::enrich_product( $wc );
+            // Merge variation attributes (e.g. sizes/colors on variable WooCommerce products) when available.
+            if ( method_exists( $wc, 'is_type' ) && $wc->is_type( 'variable' ) && method_exists( $wc, 'get_children' ) ) {
+                $var_attrs = self::extract_variation_attribute_values( $wc );
+                if ( ! empty( $var_attrs ) ) {
+                    $item['_variation_values'] = $var_attrs;
+                }
+            }
+            $enriched[] = $item;
+        }
+
+        // Strict eligibility: visible, purchasable, in-stock, real positive price.
+        $enriched = array_values( array_filter( $enriched, function( $p ) {
+            $price = (float) ( $p['price_numeric'] ?? 0 );
+            return ! empty( $p['is_visible'] )
+                && ! empty( $p['is_purchasable'] )
+                && ! empty( $p['is_in_stock'] )
+                && $price > 0;
+        } ) );
+
+        $enriched = self::deduplicate( $enriched );
+        $enriched = self::apply_budget_filter( $enriched, $args );
+
+        if ( empty( $enriched ) ) {
+            return [ 'products' => [], 'exact_match' => false ];
+        }
+
+        // Apply gender guard (avoid returning women's items for men's requests and vice versa).
+        if ( '' !== $gender ) {
+            $gender_filtered = array_values( array_filter( $enriched, function( $p ) use ( $gender ) {
+                return ! self::product_is_opposite_gender( $p, $gender );
+            } ) );
+            if ( ! empty( $gender_filtered ) ) {
+                $enriched = $gender_filtered;
+            }
+        }
+
+        $exact_match = true;
+
+        // Filter by brand if specified.
+        if ( '' !== $brand ) {
+            $brand_matches = array_values( array_filter( $enriched, function( $p ) use ( $brand ) {
+                return self::product_matches_filter_token( $p, [ $brand ] );
+            } ) );
+            if ( empty( $brand_matches ) ) {
+                return [ 'products' => [], 'exact_match' => false ];
+            }
+            $enriched = $brand_matches;
+        }
+
+        // Filter by style if specified (with Arabic synonyms).
+        if ( '' !== $style ) {
+            $style_aliases = self::category_filter_synonyms( 'style', $style );
+            $style_matches = array_values( array_filter( $enriched, function( $p ) use ( $style_aliases ) {
+                return self::product_matches_filter_token( $p, $style_aliases );
+            } ) );
+            if ( empty( $style_matches ) ) {
+                return [ 'products' => [], 'exact_match' => false ];
+            }
+            $enriched = $style_matches;
+        }
+
+        // Filter by color if specified (attributes, variations, name, description, tags).
+        if ( '' !== $color ) {
+            $color_aliases = self::category_filter_synonyms( 'color', $color );
+            $color_matches = array_values( array_filter( $enriched, function( $p ) use ( $color_aliases ) {
+                return self::product_matches_color( $p, $color_aliases );
+            } ) );
+            if ( empty( $color_matches ) ) {
+                return [ 'products' => [], 'exact_match' => false ];
+            }
+            $enriched = $color_matches;
+        }
+
+        // Filter by size ONLY strictly when size metadata exists on candidate products;
+        // if no products carry size attributes at all, preserve matches with exact_match = false.
+        if ( '' !== $size ) {
+            $has_any_size_data = false;
+            foreach ( $enriched as $p ) {
+                if ( self::product_has_size_metadata( $p ) ) {
+                    $has_any_size_data = true;
+                    break;
+                }
+            }
+
+            if ( $has_any_size_data ) {
+                $size_matches = array_values( array_filter( $enriched, function( $p ) use ( $size ) {
+                    return self::product_matches_size( $p, $size );
+                } ) );
+                if ( empty( $size_matches ) ) {
+                    return [ 'products' => [], 'exact_match' => false ];
+                }
+                $enriched = $size_matches;
+            } else {
+                $exact_match = false;
+            }
+        }
+
+        $ranking_known = [];
+        foreach ( [ 'product_type', 'gender', 'style', 'color', 'size', 'brand', 'budget_max', 'recency', 'budget_sort' ] as $rk ) {
+            if ( ! empty( $args[ $rk ] ) ) {
+                $ranking_known[ $rk ] = $args[ $rk ];
+            }
+        }
+        if ( '' !== $style ) {
+            $ranking_known['purpose'] = $style;
+        }
+
+        $enriched = self::sort_products( $enriched, $ranking_known );
+        $enriched = self::rank_products( $enriched, $ranking_known );
+
+        foreach ( $enriched as &$item ) {
+            unset( $item['_variation_values'] );
+        }
+        unset( $item );
+
+        return [
+            'products'    => array_slice( $enriched, 0, $limit ),
+            'exact_match' => $exact_match,
+        ];
+    }
+
+    private static function extract_variation_attribute_values( $wc_product ) {
+        $values = [];
+        foreach ( (array) $wc_product->get_children() as $vid ) {
+            $variation = wc_get_product( $vid );
+            if ( ! $variation ) continue;
+            if ( method_exists( $variation, 'is_in_stock' ) && ! $variation->is_in_stock() ) continue;
+            if ( method_exists( $variation, 'get_attributes' ) ) {
+                foreach ( (array) $variation->get_attributes() as $k => $v ) {
+                    if ( is_scalar( $v ) && '' !== trim( (string) $v ) ) {
+                        $values[] = trim( (string) $v );
+                    }
+                }
+            }
+        }
+        return array_values( array_unique( $values ) );
+    }
+
+    private static function category_filter_synonyms( $kind, $canon ) {
+        if ( 'color' === $kind ) {
+            $map = [
+                'أسود'  => [ 'اسود', 'أسود', 'سوداء', 'black' ],
+                'أبيض'  => [ 'ابيض', 'أبيض', 'بيضاء', 'white' ],
+                'بني'   => [ 'بني', 'بنيه', 'بنية', 'عسلي', 'جملي', 'brown', 'tan' ],
+                'أزرق'  => [ 'ازرق', 'أزرق', 'زرقاء', 'كحلي', 'سماوي', 'blue', 'navy' ],
+                'أحمر'  => [ 'احمر', 'أحمر', 'حمراء', 'عنابي', 'نبيتي', 'red', 'burgundy' ],
+                'أخضر'  => [ 'اخضر', 'أخضر', 'خضراء', 'زيتي', 'green', 'olive' ],
+                'رمادي' => [ 'رمادي', 'رصاصي', 'سيلفر', 'فضي', 'gray', 'grey', 'silver' ],
+                'بيج'   => [ 'بيج', 'سكري', 'كريمي', 'beige', 'cream' ],
+                'ذهبي'  => [ 'ذهبي', 'ذهبيه', 'ذهبية', 'gold' ],
+                'وردي'  => [ 'وردي', 'زهري', 'بينك', 'pink' ],
+            ];
+            return $map[ $canon ] ?? [ $canon ];
+        }
+        if ( 'style' === $kind ) {
+            $map = [
+                'رياضي'     => [ 'رياضي', 'رياضيه', 'رياضية', 'سبورت', 'جري', 'مشي', 'sport', 'sports', 'running' ],
+                'رسمي'      => [ 'رسمي', 'رسميه', 'رسمية', 'كلاسيك', 'سهره', 'سهرة', 'formal', 'classic' ],
+                'كاجول'     => [ 'كاجول', 'كاجوال', 'يومي', 'عملي', 'casual' ],
+                'طبي'       => [ 'طبي', 'طبيه', 'طبية', 'مريح', 'مريحه', 'مريحة', 'orthopedic', 'comfort' ],
+                'صيفي'      => [ 'صيفي', 'صيفيه', 'صيفية', 'summer' ],
+                'شتوي'      => [ 'شتوي', 'شتويه', 'شتوية', 'winter' ],
+                'شرقي'      => [ 'شرقي', 'شرقيه', 'شرقية', 'عود', 'عنبر', 'مسك', 'oriental' ],
+                'أوتوماتيك' => [ 'اوتوماتيك', 'أوتوماتيك', 'automatic' ],
+                'كوارتز'    => [ 'كوارتز', 'quartz' ],
+                'ذكية'      => [ 'ذكيه', 'ذكية', 'سمارت', 'smart' ],
+            ];
+            return $map[ $canon ] ?? [ $canon ];
+        }
+        return [ $canon ];
+    }
+
+    private static function product_is_opposite_gender( $p, $requested_gender ) {
+        if ( 'رجالي' !== $requested_gender && 'نسائي' !== $requested_gender ) {
+            return false;
+        }
+        $blob = self::product_search_blob( $p );
+        if ( false !== strpos( $blob, 'للجنسين' ) || false !== strpos( $blob, 'unisex' ) ) {
+            return false;
+        }
+        $men_markers   = [ 'رجالي', 'رجاليه', 'للرجال', 'men', 'mens' ];
+        $women_markers = [ 'نسائي', 'نسائيه', 'للنساء', 'حريمي', 'بناتي', 'women', 'womens', 'ladies' ];
+        $has_men = false;
+        foreach ( $men_markers as $m ) {
+            if ( false !== strpos( $blob, self::normalize_string( $m ) ) ) { $has_men = true; break; }
+        }
+        $has_women = false;
+        foreach ( $women_markers as $w ) {
+            if ( false !== strpos( $blob, self::normalize_string( $w ) ) ) { $has_women = true; break; }
+        }
+        if ( 'رجالي' === $requested_gender && $has_women && ! $has_men ) {
+            return true;
+        }
+        if ( 'نسائي' === $requested_gender && $has_men && ! $has_women ) {
+            return true;
+        }
+        return false;
+    }
+
+    private static function product_matches_filter_token( $p, $aliases ) {
+        $blob = self::product_search_blob( $p );
+        if ( ! empty( $p['_variation_values'] ) ) {
+            $blob .= ' ' . self::normalize_string( implode( ' ', $p['_variation_values'] ) );
+        }
+        foreach ( (array) $aliases as $alias ) {
+            $needle = self::normalize_string( (string) $alias );
+            if ( '' !== $needle && false !== strpos( $blob, $needle ) ) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static function product_matches_color( $p, $color_aliases ) {
+        foreach ( (array) ( $p['attributes'] ?? [] ) as $attr ) {
+            if ( ! is_array( $attr ) ) continue;
+            $aname  = self::normalize_string( (string) ( $attr['name'] ?? '' ) );
+            $alabel = self::normalize_string( (string) ( $attr['label'] ?? '' ) );
+            if ( false !== strpos( $aname, 'color' ) || false !== strpos( $aname, 'لون' ) || false !== strpos( $alabel, 'لون' ) ) {
+                foreach ( (array) ( $attr['values'] ?? [] ) as $val ) {
+                    $nv = self::normalize_string( (string) $val );
+                    foreach ( (array) $color_aliases as $alias ) {
+                        if ( $nv === self::normalize_string( (string) $alias ) ) {
+                            return true;
+                        }
+                    }
+                }
+            }
+        }
+        return self::product_matches_filter_token( $p, $color_aliases );
+    }
+
+    private static function product_has_size_metadata( $p ) {
+        foreach ( (array) ( $p['attributes'] ?? [] ) as $attr ) {
+            if ( ! is_array( $attr ) ) continue;
+            $aname  = self::normalize_string( (string) ( $attr['name'] ?? '' ) );
+            $alabel = self::normalize_string( (string) ( $attr['label'] ?? '' ) );
+            if ( preg_match( '/(size|shoes|مقاس|نمر|قياس|سايز)/iu', $aname . ' ' . $alabel ) ) {
+                if ( ! empty( $attr['values'] ) ) {
+                    return true;
+                }
+            }
+        }
+        if ( ! empty( $p['_variation_values'] ) ) {
+            foreach ( $p['_variation_values'] as $vv ) {
+                if ( preg_match( '/^(?:\d{2}|XXL|XL|XS|S|M|L|نفرين|نفر)$/iu', trim( (string) $vv ) ) ) {
+                    return true;
+                }
+            }
+        }
+        $blob = self::product_search_blob( $p );
+        if ( preg_match( '/(?:مقاس|نمره|قياس|سايز|size)\s*\d{2}/iu', $blob ) ) {
+            return true;
+        }
+        return false;
+    }
+
+    private static function product_matches_size( $p, $size ) {
+        $needle = self::normalize_string( (string) $size );
+        if ( '' === $needle ) return true;
+
+        foreach ( (array) ( $p['attributes'] ?? [] ) as $attr ) {
+            if ( ! is_array( $attr ) ) continue;
+            $aname  = self::normalize_string( (string) ( $attr['name'] ?? '' ) );
+            $alabel = self::normalize_string( (string) ( $attr['label'] ?? '' ) );
+            if ( preg_match( '/(size|shoes|مقاس|نمر|قياس|سايز)/iu', $aname . ' ' . $alabel ) ) {
+                foreach ( (array) ( $attr['values'] ?? [] ) as $val ) {
+                    if ( self::normalize_string( (string) $val ) === $needle ) {
+                        return true;
+                    }
+                }
+            }
+        }
+        if ( ! empty( $p['_variation_values'] ) ) {
+            foreach ( $p['_variation_values'] as $vv ) {
+                if ( self::normalize_string( (string) $vv ) === $needle ) {
+                    return true;
+                }
+            }
+        }
+        $blob = self::product_search_blob( $p );
+        if ( preg_match( '/(?:^|\s)' . preg_quote( $needle, '/' ) . '(?:\s|$)/iu', $blob ) ) {
+            return true;
+        }
+        return false;
+    }
+
     public static function rank_products( $products, $known ) {
         if ( ! is_array( $products ) || empty( $products ) ) return [];
         $known = is_array( $known ) ? $known : [];

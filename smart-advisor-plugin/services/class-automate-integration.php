@@ -371,15 +371,68 @@ class SA_AutoMate_Integration {
         $query  = sanitize_text_field( (string) $request->get_param( 'query' ) );
         $limit  = max( 1, min( 8, absint( $request->get_param( 'limit' ) ?: 5 ) ) );
         $is_group = (bool) rest_sanitize_boolean( $request->get_param( 'is_group' ) );
+        $incoming_ctx = is_array( $request->get_param( 'active_context' ) ) ? $request->get_param( 'active_context' ) : [];
 
         $wa_config = self::config();
         $cs = class_exists( 'SA_Customer_Service_Settings' ) ? SA_Customer_Service_Settings::get_config() : [];
 
-        if ( 'product_search' === $intent && ( empty( $wa_config['skills']['product_search'] ) || ( isset( $cs['skills']['product_search'] ) && empty( $cs['skills']['product_search'] ) ) ) ) {
+        if ( in_array( $intent, [ 'product_search', 'CATEGORY_BROWSE', 'CATEGORY_LINK' ], true ) && ( empty( $wa_config['skills']['product_search'] ) || ( isset( $cs['skills']['product_search'] ) && empty( $cs['skills']['product_search'] ) ) ) ) {
             return new WP_Error( 'sa_product_search_forbidden', 'مهارة البحث عن المنتجات غير مفعّلة.', [ 'status' => 403 ] );
         }
         if ( 'offers' === $intent && ( empty( $wa_config['skills']['offers'] ) || ( isset( $cs['skills']['offers_discounts'] ) && empty( $cs['skills']['offers_discounts'] ) ) ) ) {
             return new WP_Error( 'sa_offers_forbidden', 'مهارة العروض غير مفعّلة.', [ 'status' => 403 ] );
+        }
+
+        // Category intent & multi-turn disambiguation for Orchestrator (AutoMate AI).
+        if ( '' !== $query && class_exists( 'SA_Category_Intent_Service' ) && SA_Category_Intent_Service::is_available() && in_array( $intent, [ 'CATEGORY_BROWSE', 'CATEGORY_LINK', 'product_search', 'general' ], true ) ) {
+            $cat_res = SA_Category_Intent_Service::process_turn( $query, $incoming_ctx, $wa_config );
+            if ( is_array( $cat_res ) && ! empty( $cat_res['handled'] ) ) {
+                $cat_intent = (string) ( $cat_res['intent'] ?? $intent );
+                $is_cat_only = in_array( $cat_intent, [ SA_Category_Intent_Service::INTENT_CATEGORY_BROWSE, SA_Category_Intent_Service::INTENT_CATEGORY_LINK ], true );
+
+                $categories = [];
+                $cat_facts  = [];
+                if ( ! empty( $cat_res['category_url'] ) && ! empty( $cat_res['category_id'] ) ) {
+                    $categories[] = [
+                        'id'           => (int) $cat_res['category_id'],
+                        'name'         => (string) ( $cat_res['category_name'] ?? '' ),
+                        'url'          => (string) $cat_res['category_url'],
+                        'product_type' => $cat_res['product_type'],
+                        'gender'       => $cat_res['gender'],
+                    ];
+                    $cat_facts[] = 'التصنيف المناسب: ' . (string) $cat_res['category_name'];
+                    $cat_facts[] = 'رابط التصنيف الموثوق: ' . (string) $cat_res['category_url'];
+                }
+
+                // For CATEGORY_BROWSE / CATEGORY_LINK: NEVER dump unsolicited product lists!
+                $items = $is_cat_only ? [] : array_slice( (array) ( $cat_res['products'] ?? [] ), 0, $limit );
+                $summary = ! empty( $cat_facts )
+                    ? implode( ' | ', $cat_facts )
+                    : (string) ( $cat_res['reply'] ?? '' );
+
+                return self::respond( [
+                    'ok'                => true,
+                    'source'            => 'smart_advisor_woocommerce',
+                    'intent'            => $cat_intent,
+                    'summary'           => $summary,
+                    'facts'             => $cat_facts,
+                    'categories'        => $categories,
+                    'category_id'       => $cat_res['category_id'],
+                    'category_name'     => $cat_res['category_name'],
+                    'category_url'      => $cat_res['category_url'],
+                    'product_type'      => $cat_res['product_type'],
+                    'gender'            => $cat_res['gender'],
+                    'filters'           => $cat_res['filters'],
+                    'context_updated'   => (bool) $cat_res['context_updated'],
+                    'items'             => $items,
+                    'products'          => $items,
+                    'has_verified_data' => ! empty( $categories ) || ! empty( $items ),
+                    'suggested_reply'   => (string) ( $cat_res['reply'] ?? '' ),
+                    'instruction'       => $is_cat_only
+                        ? 'طلب العميل تصنيفاً عاماً. أرسل رابط التصنيف الموثوق مع سؤال واحد عن المواصفات دون سرد قائمة منتجات، وصغ الرد النهائي في AutoMate AI.'
+                        : 'هذه بيانات متجر موثوقة. لا تخترع حقائق أو أسعاراً غير موجودة، وصغ الرد النهائي في AutoMate AI.',
+                ], 200 );
+            }
         }
 
         $facts = [];
@@ -409,6 +462,7 @@ class SA_AutoMate_Integration {
             'intent'            => $intent,
             'summary'           => $summary,
             'facts'             => array_values( $facts ),
+            'categories'        => [],
             'items'             => $products,
             'products'          => $products,
             'has_verified_data' => $has_verified,
@@ -1389,6 +1443,12 @@ class SA_AutoMate_Integration {
 
     private static function normalize_knowledge_intent( $raw ) {
         $clean = sanitize_key( (string) $raw );
+        if ( 'category_browse' === $clean ) {
+            return 'CATEGORY_BROWSE';
+        }
+        if ( 'category_link' === $clean ) {
+            return 'CATEGORY_LINK';
+        }
         $supported = [ 'product_search', 'product_details', 'offers', 'store_info', 'store_location', 'shipping_policy', 'returns_policy', 'general' ];
         return in_array( $clean, $supported, true ) ? $clean : 'general';
     }
