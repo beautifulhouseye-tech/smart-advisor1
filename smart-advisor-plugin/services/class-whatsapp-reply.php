@@ -498,8 +498,10 @@ class SA_WhatsApp_Reply {
                         }
                     }
 
+                    $store_name = function_exists( 'get_bloginfo' ) ? sanitize_text_field( (string) get_bloginfo( 'name' ) ) : '';
                     $payload = [
                         'reply'           => $orchestrator_mode ? '' : $formatted_reply,
+                        'store_name'      => $store_name,
                         'intent'          => $cat_result['intent'],
                         'category_id'     => $cat_result['category_id'],
                         'category_name'   => $cat_result['category_name'],
@@ -531,8 +533,11 @@ class SA_WhatsApp_Reply {
             $asks_offers = (bool) preg_match( '/(عروض|خصومات|تخفيضات|التخفيض|الخصم|فيه خصم|عندكم خصم|عرض خاص|sale|discount|offer)/iu', $message_lc );
             if ( $asks_offers ) $action = 'offers';
             $reply = '';
+            $legacy_products = [];
+            $legacy_intent = $action;
 
             if ( 'offers' === $action ) {
+                $legacy_intent = 'OFFERS';
                 if ( empty( $config['skills']['offers'] ) || ! self::global_skill_enabled( 'offers_discounts' ) ) {
                     $reply = self::render_template( 'offers_disabled', [], 'العروض والخصومات غير متاحة حالياً.' );
                 } elseif ( ! function_exists( 'wc_get_products' ) ) {
@@ -542,8 +547,28 @@ class SA_WhatsApp_Reply {
                     $lines = [];
                     foreach ( (array) $sale_products as $product ) {
                         if ( ! $product || ! $product->is_visible() || ! $product->is_purchasable() || ! $product->is_in_stock() || ! $product->is_on_sale() ) continue;
-                        $line = '• ' . $product->get_name() . ' — ' . wp_strip_all_tags( $product->get_price_html() );
-                        $url = esc_url_raw( get_permalink( $product->get_id() ) );
+                        $pid = (int) $product->get_id();
+                        $p_name = (string) $product->get_name();
+                        $p_price = wp_strip_all_tags( (string) $product->get_price_html() );
+                        $p_price_num = (float) $product->get_price();
+                        $p_currency = function_exists( 'get_woocommerce_currency' ) ? get_woocommerce_currency() : '';
+                        $p_desc = trim( wp_strip_all_tags( (string) $product->get_short_description() ) );
+                        $p_img_id = method_exists( $product, 'get_image_id' ) ? (int) $product->get_image_id() : 0;
+                        $p_img = ( $p_img_id > 0 && function_exists( 'wp_get_attachment_image_url' ) )
+                            ? esc_url_raw( (string) wp_get_attachment_image_url( $p_img_id, 'large' ) )
+                            : '';
+                        $url = esc_url_raw( get_permalink( $pid ) );
+                        $legacy_products[] = [
+                            'id'                => $pid,
+                            'name'              => $p_name,
+                            'price'             => $p_price,
+                            'price_numeric'     => $p_price_num,
+                            'currency'          => $p_currency,
+                            'short_description' => $p_desc,
+                            'image'             => $p_img,
+                            'url'               => $url,
+                        ];
+                        $line = '• ' . $p_name . ' — ' . $p_price;
                         if ( 'single_link' === $config['reply_mode'] && empty( $lines ) && $url ) $line .= "\n" . $url;
                         elseif ( 'multi_link' === $config['reply_mode'] && $url ) $line .= "\n" . $url;
                         $lines[] = $line;
@@ -564,6 +589,7 @@ class SA_WhatsApp_Reply {
             } elseif ( 'ask' === $action ) {
                 $reply = $analysis['question_text'] ?: self::render_template( 'ask_clarification', [], 'هل يمكنك توضيح طلبك؟' );
             } else {
+                $legacy_intent = 'PRODUCT_SEARCH';
                 if ( empty( $config['skills']['product_search'] ) || ! self::global_skill_enabled( 'product_search' ) ) {
                     $reply = self::render_template( 'search_disabled', [], 'البحث غير متاح حالياً.' );
                     return $finish_complete( [ 'reply' => self::format_for_whatsapp( $reply ) ], 200 );
@@ -590,6 +616,7 @@ class SA_WhatsApp_Reply {
                         $reply = self::render_template( 'no_products', [], 'لم أجد منتجات مطابقة.' );
                     } else {
                         $listed = array_slice( $products, 0, 3 );
+                        $legacy_products = $listed;
                         $lines  = [ self::render_template( 'products_intro', [], 'وجدت لك:' ) ];
                         $first  = true;
 
@@ -650,8 +677,14 @@ class SA_WhatsApp_Reply {
                 }
             }
 
+            $store_name = function_exists( 'get_bloginfo' ) ? sanitize_text_field( (string) get_bloginfo( 'name' ) ) : '';
             $final_reply = self::format_for_whatsapp( $reply );
-            $final_payload = [ 'reply' => $orchestrator_mode ? '' : $final_reply ];
+            $final_payload = [
+                'reply'      => $orchestrator_mode ? '' : $final_reply,
+                'store_name' => $store_name,
+                'intent'     => $legacy_intent,
+                'products'   => $legacy_products,
+            ];
             if ( $orchestrator_mode ) {
                 $final_payload['suggested_reply']                = $final_reply;
                 $final_payload['reply_deferred_to_orchestrator'] = true;

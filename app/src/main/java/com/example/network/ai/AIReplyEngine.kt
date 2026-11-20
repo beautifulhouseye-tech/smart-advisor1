@@ -18,6 +18,7 @@ import kotlinx.serialization.json.doubleOrNull
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.longOrNull
 import java.net.URI
 import javax.inject.Inject
 import javax.inject.Singleton
@@ -80,6 +81,7 @@ class AIReplyEngine @Inject constructor(
         val accountAction: String = "",
         val accountActionConfirmed: Boolean = false,
         val memoryUpdate: AiMemoryProposal? = null,
+        val selectedProductId: Long? = null,
         val isStructuredJson: Boolean = false
     )
 
@@ -859,6 +861,7 @@ class AIReplyEngine @Inject constructor(
                     accountAction = parsedObj["account_action"]?.jsonPrimitive?.contentOrNull?.trim().orEmpty(),
                     accountActionConfirmed = parsedObj["account_action_confirmed"]?.jsonPrimitive?.booleanOrNull == true,
                     memoryUpdate = memProposal,
+                    selectedProductId = parsedObj["selected_product_id"]?.jsonPrimitive?.longOrNull,
                     isStructuredJson = true
                 )
             }

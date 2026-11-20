@@ -4,15 +4,16 @@ import android.accessibilityservice.AccessibilityService
 import android.content.Intent
 import android.net.Uri
 import android.os.Bundle
-import android.os.Handler
-import android.os.Looper
+import android.util.Log
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
 import com.example.data.local.entity.DedupKeyEntity
 import com.example.engine.ConversationMemoryManager
 import com.example.engine.IdempotencyGuard
+import com.example.engine.ImageDeliveryState
 import com.example.engine.PendingAccessibilityReply
 import com.example.engine.PendingReplyCoordinator
+import com.example.media.ProductImageCacheManager
 import dagger.hilt.EntryPoint
 import dagger.hilt.InstallIn
 import dagger.hilt.android.EntryPointAccessors
@@ -32,6 +33,13 @@ class AutoReplyAccessibilityService : AccessibilityService() {
         fun pendingReplyCoordinator(): PendingReplyCoordinator
         fun idempotencyGuard(): IdempotencyGuard
         fun conversationMemoryManager(): ConversationMemoryManager
+        fun productImageCacheManager(): ProductImageCacheManager
+    }
+
+    internal enum class PostSendStatus {
+        CONFIRMED,
+        FAILED_PRE_SEND,
+        AMBIGUOUS
     }
 
     private val entryPoint: AccessibilityEntryPoint by lazy {
@@ -53,8 +61,11 @@ class AutoReplyAccessibilityService : AccessibilityService() {
         runCatching { entryPoint.conversationMemoryManager() }.getOrNull()
     }
 
+    private val productImageCacheManager: ProductImageCacheManager? by lazy {
+        runCatching { entryPoint.productImageCacheManager() }.getOrNull()
+    }
+
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
-    private val mainHandler = Handler(Looper.getMainLooper())
 
     override fun onServiceConnected() {
         super.onServiceConnected()
@@ -101,7 +112,12 @@ class AutoReplyAccessibilityService : AccessibilityService() {
         windowTitleOverride: CharSequence? = null,
         clockMs: () -> Long = { System.currentTimeMillis() },
         sendButtonDelayMs: Long = 220L,
-        memoryManagerOverride: ConversationMemoryManager? = null
+        memoryManagerOverride: ConversationMemoryManager? = null,
+        cacheManagerOverride: ProductImageCacheManager? = null,
+        stepDelayMs: Long = 450L,
+        postSendVerifyDelayMs: Long = 250L,
+        rootProvider: (() -> AccessibilityNodeInfo?)? = null,
+        postSendVerifier: ((AccessibilityNodeInfo?) -> PostSendStatus)? = null
     ): Boolean {
         val pkg = eventPackage?.trim().orEmpty()
         if (pkg.isEmpty()) return false
@@ -113,10 +129,14 @@ class AutoReplyAccessibilityService : AccessibilityService() {
         val pending = coordinatorOverride.peekValidForPackage(pkg) ?: return false
         if (pending.targetPackage != pkg) return false
 
+        val resolvedMemoryManager = memoryManagerOverride ?: conversationMemoryManager
+        val resolvedCacheManager = cacheManagerOverride ?: productImageCacheManager
+
         // I4: TTL > 30s -> reject & drop
         if (clockMs() - pending.createdAtMs > PendingReplyCoordinator.REPLY_EXPIRY_MS) {
             coordinatorOverride.consumeAtomic(pending.id)
-            (memoryManagerOverride ?: conversationMemoryManager)?.discardPendingHandoffTurn(pending.msgKey)
+            resolvedMemoryManager?.discardPendingHandoffTurn(pending.msgKey)
+            resolvedCacheManager?.cleanupStagedMedia(pending.mediaStoreUri)
             return false
         }
 
@@ -125,6 +145,7 @@ class AutoReplyAccessibilityService : AccessibilityService() {
             val dedupEntry = idempotencyGuardOverride.getEntry(pending.msgKey)
             if (dedupEntry != null && isBlockedDedupState(dedupEntry)) {
                 coordinatorOverride.consumeAtomic(pending.id)
+                resolvedCacheManager?.cleanupStagedMedia(pending.mediaStoreUri)
                 return false
             }
         }
@@ -138,10 +159,18 @@ class AutoReplyAccessibilityService : AccessibilityService() {
         if (!pendingUri.isNullOrBlank()) {
             // I5: Atomic single-use removal BEFORE acting
             if (!coordinatorOverride.consumeAtomic(pending.id)) return false
-            val imageSent = runCatching {
-                performImageFlow(root, Uri.parse(pendingUri), pending.replyText, pending.msgKey)
-            }.isSuccess
-            return imageSent
+            return performProductImageFlow(
+                pending = pending,
+                initialRoot = root,
+                coordinatorOverride = coordinatorOverride,
+                idempotencyGuardOverride = idempotencyGuardOverride,
+                memoryManagerOverride = resolvedMemoryManager,
+                cacheManagerOverride = resolvedCacheManager,
+                stepDelayMs = stepDelayMs,
+                postSendVerifyDelayMs = postSendVerifyDelayMs,
+                rootProvider = rootProvider ?: { runCatching { rootInActiveWindow }.getOrNull() },
+                postSendVerifier = postSendVerifier
+            )
         }
 
         val editNode = findEditableInputNode(root) ?: return false
@@ -165,7 +194,9 @@ class AutoReplyAccessibilityService : AccessibilityService() {
             delay(sendButtonDelayMs)
         }
 
-        val refreshedRoot = runCatching { rootInActiveWindow }.getOrNull() ?: root
+        val refreshedRoot = rootProvider?.invoke()
+            ?: runCatching { rootInActiveWindow }.getOrNull()
+            ?: root
         val sendNode = findSendButtonNode(refreshedRoot)
         if (sendNode != null && sendNode.performAction(AccessibilityNodeInfo.ACTION_CLICK)) {
             coordinatorOverride.markServiceActivity()
@@ -173,7 +204,7 @@ class AutoReplyAccessibilityService : AccessibilityService() {
             if (pending.msgKey.isNotBlank()) {
                 idempotencyGuardOverride.updateSendState(pending.msgKey, DedupKeyEntity.SEND_SENT)
                 idempotencyGuardOverride.markCompleted(pending.msgKey)
-                (memoryManagerOverride ?: conversationMemoryManager)?.confirmHandoffTurnSent(pending.msgKey)
+                resolvedMemoryManager?.confirmHandoffTurnSent(pending.msgKey)
             }
             return true
         }
@@ -215,23 +246,38 @@ class AutoReplyAccessibilityService : AccessibilityService() {
         senderName: String = "",
         msgKey: String = ""
     ) {
-        coordinator.enqueue(
-            PendingAccessibilityReply(
-                msgKey = msgKey,
-                targetPackage = packageName,
-                senderName = senderName,
-                replyText = caption,
-                imageUri = imageUri.toString()
-            )
+        val pending = PendingAccessibilityReply(
+            msgKey = msgKey,
+            targetPackage = packageName,
+            senderName = senderName,
+            replyText = caption,
+            imageUri = imageUri.toString(),
+            requireCaptionBeforeSend = caption.isNotBlank()
         )
-        mainHandler.post {
+        coordinator.enqueue(pending)
+        serviceScope.launch {
             launchPackage(packageName)
-            mainHandler.postDelayed({
-                val root = rootInActiveWindow ?: return@postDelayed
-                if (senderName.isBlank() || matchesOpenConversation(root, senderName)) {
-                    performImageFlow(root, imageUri, caption, msgKey)
-                }
-            }, 700L)
+            delay(700L)
+            val root = runCatching { rootInActiveWindow }.getOrNull() ?: return@launch
+            if (senderName.isNotBlank()) {
+                handleEventInternal(
+                    eventPackage = packageName,
+                    rootNode = root
+                )
+            } else if (coordinator.consumeAtomic(pending.id)) {
+                performProductImageFlow(
+                    pending = pending,
+                    initialRoot = root,
+                    coordinatorOverride = coordinator,
+                    idempotencyGuardOverride = idempotencyGuard,
+                    memoryManagerOverride = conversationMemoryManager,
+                    cacheManagerOverride = productImageCacheManager,
+                    stepDelayMs = 450L,
+                    postSendVerifyDelayMs = 250L,
+                    rootProvider = { runCatching { rootInActiveWindow }.getOrNull() },
+                    postSendVerifier = null
+                )
+            }
         }
     }
 
@@ -241,65 +287,190 @@ class AutoReplyAccessibilityService : AccessibilityService() {
         runCatching { startActivity(launchIntent) }
     }
 
-    private fun performImageFlow(
-        rootNode: AccessibilityNodeInfo,
-        imageUri: Uri,
-        caption: String,
-        msgKey: String = ""
-    ) {
-        // 2. Click attachment icon (findByViewId / description)
-        val attachNode = findByViewId(
-            rootNode,
-            listOf("attach", "clip", "input_attach", "attachment", "btn_attach")
-        ) ?: findByText(rootNode, listOf("attach", "مرفق", "إرفاق"))
-        attachNode?.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+    private suspend fun performProductImageFlow(
+        pending: PendingAccessibilityReply,
+        initialRoot: AccessibilityNodeInfo,
+        coordinatorOverride: PendingReplyCoordinator,
+        idempotencyGuardOverride: IdempotencyGuard,
+        memoryManagerOverride: ConversationMemoryManager?,
+        cacheManagerOverride: ProductImageCacheManager?,
+        stepDelayMs: Long,
+        postSendVerifyDelayMs: Long,
+        rootProvider: () -> AccessibilityNodeInfo?,
+        postSendVerifier: ((AccessibilityNodeInfo?) -> PostSendStatus)?
+    ): Boolean {
+        fun recordState(state: ImageDeliveryState) {
+            if (pending.msgKey.isNotBlank()) {
+                coordinatorOverride.recordDeliveryState(pending.msgKey, state)
+            }
+        }
 
-        // 3. Select Gallery option (findByText)
-        mainHandler.postDelayed({
-            val galleryRoot = rootInActiveWindow ?: return@postDelayed
-            val galleryNode = findByText(
-                galleryRoot,
-                listOf("gallery", "photos", "المعرض", "معرض", "صور")
-            )
-            galleryNode?.performAction(AccessibilityNodeInfo.ACTION_CLICK)
-
-            // 4. Select image thumbnail (findByViewId + CLICK)
-            mainHandler.postDelayed({
-                val pickerRoot = rootInActiveWindow ?: return@postDelayed
-                val mediaNode = findByViewId(
-                    pickerRoot,
-                    listOf("thumbnail", "media_item", "grid", "image", "photo")
+        suspend fun failPreSend(reason: String): Boolean {
+            Log.w(TAG, "Product image pre-send failure: $reason")
+            recordState(ImageDeliveryState.FAILED)
+            if (pending.msgKey.isNotBlank()) {
+                idempotencyGuardOverride.updateSendState(
+                    pending.msgKey,
+                    DedupKeyEntity.SEND_FAILED_CONFIRMED
                 )
-                mediaNode?.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+            }
+            memoryManagerOverride?.discardPendingHandoffTurn(pending.msgKey)
+            runCatching { cacheManagerOverride?.cleanupStagedMedia(pending.mediaStoreUri) }
+            runCatching { pending.onPreSendImageFailure?.invoke() }
+                .onFailure { err -> Log.e(TAG, "Pre-send text fallback invocation failed", err) }
+            return false
+        }
 
-                // 5. Optional caption & click Send ("إرسال" + CLICK)
-                mainHandler.postDelayed({
-                    val sendRoot = rootInActiveWindow ?: return@postDelayed
-                    if (caption.isNotBlank()) {
-                        findEditableInputNode(sendRoot)?.let { editNode ->
-                            val args = Bundle().apply {
-                                putCharSequence(
-                                    AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE,
-                                    caption
-                                )
-                            }
-                            editNode.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args)
-                        }
-                    }
-                    val sendButton = findByText(sendRoot, listOf("إرسال", "send"))
-                        ?: findSendButtonNode(sendRoot)
-                    if (sendButton?.performAction(AccessibilityNodeInfo.ACTION_CLICK) == true) {
-                        coordinator.markServiceActivity()
-                        if (msgKey.isNotBlank()) {
-                            serviceScope.launch {
-                                idempotencyGuard.updateSendState(msgKey, DedupKeyEntity.SEND_SENT)
-                                idempotencyGuard.markCompleted(msgKey)
-                            }
-                        }
-                    }
-                }, 600L)
-            }, 600L)
-        }, 450L)
+        // Step 1: Click attachment icon -> OPENING_ATTACHMENTS
+        recordState(ImageDeliveryState.OPENING_ATTACHMENTS)
+        val attachNode = findByViewId(
+            initialRoot,
+            listOf("attach", "clip", "input_attach", "attachment", "btn_attach")
+        ) ?: findByText(initialRoot, listOf("attach", "مرفق", "إرفاق"))
+
+        val attachClicked = runCatching {
+            attachNode?.performAction(AccessibilityNodeInfo.ACTION_CLICK) == true
+        }.getOrDefault(false)
+        if (!attachClicked) {
+            return failPreSend("تعذر النقر على زر المرفقات")
+        }
+
+        if (stepDelayMs > 0L) delay(stepDelayMs)
+
+        // Step 2: Select Gallery option -> IMAGE_SELECTED (picker opened)
+        val galleryRoot = rootProvider() ?: initialRoot
+        val galleryNode = findByText(
+            galleryRoot,
+            listOf("gallery", "photos", "المعرض", "معرض", "صور")
+        ) ?: findByViewId(galleryRoot, listOf("gallery", "pick_from_gallery", "photos"))
+        val galleryClicked = runCatching {
+            galleryNode?.performAction(AccessibilityNodeInfo.ACTION_CLICK) == true
+        }.getOrDefault(false)
+        if (!galleryClicked) {
+            return failPreSend("تعذر فتح المعرض لاختيار صورة المنتج")
+        }
+
+        if (stepDelayMs > 0L) delay(stepDelayMs)
+
+        // Step 3: Select image thumbnail -> IMAGE_SELECTED
+        val pickerRoot = rootProvider() ?: galleryRoot
+        val mediaNode = findByViewId(
+            pickerRoot,
+            listOf("thumbnail", "media_item", "grid", "image", "photo", "thumb")
+        ) ?: findByText(pickerRoot, listOf("photo", "image", "صورة", "thumbnail"))
+        val mediaClicked = runCatching {
+            mediaNode?.performAction(AccessibilityNodeInfo.ACTION_CLICK) == true
+        }.getOrDefault(false)
+        if (!mediaClicked) {
+            return failPreSend("تعذر اختيار صورة المنتج من المعرض")
+        }
+        recordState(ImageDeliveryState.IMAGE_SELECTED)
+
+        if (stepDelayMs > 0L) delay(stepDelayMs)
+
+        // Step 4: CRITICAL SAFETY GATE — Enter caption BEFORE clicking Send
+        val previewRoot = rootProvider() ?: pickerRoot
+        val needsCaption = pending.requireCaptionBeforeSend || pending.replyText.isNotBlank()
+        if (needsCaption) {
+            val captionNode = findCaptionInputNode(previewRoot)
+                ?: return failPreSend("لم يتم العثور على حقل التعليق المصاحب للصورة؛ تم إلغاء إرسال الصورة")
+            val focused = runCatching {
+                captionNode.performAction(AccessibilityNodeInfo.ACTION_FOCUS)
+            }.getOrDefault(false)
+            if (!focused && captionNode.isFocusable) {
+                Log.d(TAG, "Caption focus returned false, attempting SET_TEXT directly")
+            }
+            val args = Bundle().apply {
+                putCharSequence(
+                    AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE,
+                    pending.replyText
+                )
+            }
+            val captionApplied = runCatching {
+                captionNode.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args)
+            }.getOrDefault(false)
+            if (!captionApplied) {
+                return failPreSend("فشل إدخال التعليق المصاحب للصورة؛ لن يتم إرسال صورة بلا نص")
+            }
+            recordState(ImageDeliveryState.CAPTION_ENTERED)
+            if (stepDelayMs > 0L) delay(stepDelayMs)
+        }
+
+        // Step 5: Find and click Send button -> SENDING -> SENT / FAILED / DELIVERY_UNKNOWN
+        val sendRoot = rootProvider() ?: previewRoot
+        val sendButton = findSendButtonNode(sendRoot)
+            ?: findByText(sendRoot, listOf("إرسال", "ارسال", "send"))
+            ?: return failPreSend("لم يتم العثور على زر الإرسال بعد إدخال التعليق")
+
+        recordState(ImageDeliveryState.SENDING)
+        val clickAttempt = runCatching {
+            sendButton.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+        }
+        if (clickAttempt.isFailure) {
+            return handleAmbiguousImageSend(
+                pending = pending,
+                coordinatorOverride = coordinatorOverride,
+                idempotencyGuardOverride = idempotencyGuardOverride,
+                memoryManagerOverride = memoryManagerOverride,
+                cacheManagerOverride = cacheManagerOverride,
+                reason = clickAttempt.exceptionOrNull()?.message ?: "استثناء بعد الضغط على زر الإرسال"
+            )
+        }
+        if (clickAttempt.getOrDefault(false) != true) {
+            return failPreSend("تعذر تفعيل زر إرسال الصورة")
+        }
+
+        if (postSendVerifyDelayMs > 0L) {
+            delay(postSendVerifyDelayMs)
+        }
+
+        if (postSendVerifier != null) {
+            val verifyRoot = runCatching { rootProvider() }.getOrNull() ?: sendRoot
+            when (postSendVerifier.invoke(verifyRoot)) {
+                PostSendStatus.CONFIRMED -> Unit
+                PostSendStatus.FAILED_PRE_SEND -> {
+                    return failPreSend("فشل مؤكد في شاشة الإرسال قبل التسليم")
+                }
+                PostSendStatus.AMBIGUOUS -> {
+                    return handleAmbiguousImageSend(
+                        pending = pending,
+                        coordinatorOverride = coordinatorOverride,
+                        idempotencyGuardOverride = idempotencyGuardOverride,
+                        memoryManagerOverride = memoryManagerOverride,
+                        cacheManagerOverride = cacheManagerOverride,
+                        reason = "نتيجة إرسال الصورة غير مؤكدة بعد النقر على الإرسال"
+                    )
+                }
+            }
+        }
+
+        recordState(ImageDeliveryState.SENT)
+        coordinatorOverride.markServiceActivity()
+        if (pending.msgKey.isNotBlank()) {
+            idempotencyGuardOverride.updateSendState(pending.msgKey, DedupKeyEntity.SEND_SENT)
+            idempotencyGuardOverride.markCompleted(pending.msgKey)
+            memoryManagerOverride?.confirmHandoffTurnSent(pending.msgKey)
+        }
+        runCatching { cacheManagerOverride?.cleanupStagedMedia(pending.mediaStoreUri) }
+        return true
+    }
+
+    private suspend fun handleAmbiguousImageSend(
+        pending: PendingAccessibilityReply,
+        coordinatorOverride: PendingReplyCoordinator,
+        idempotencyGuardOverride: IdempotencyGuard,
+        memoryManagerOverride: ConversationMemoryManager?,
+        cacheManagerOverride: ProductImageCacheManager?,
+        reason: String
+    ): Boolean {
+        Log.e(TAG, "Product image send ambiguous -> DELIVERY_UNKNOWN (blocking retries & fallback): $reason")
+        if (pending.msgKey.isNotBlank()) {
+            coordinatorOverride.recordDeliveryState(pending.msgKey, ImageDeliveryState.DELIVERY_UNKNOWN)
+            idempotencyGuardOverride.markDeliveryUnknown(pending.msgKey)
+        }
+        memoryManagerOverride?.discardPendingHandoffTurn(pending.msgKey)
+        runCatching { cacheManagerOverride?.cleanupStagedMedia(pending.mediaStoreUri) }
+        return false
     }
 
     internal fun matchesOpenConversation(
@@ -377,13 +548,21 @@ class AutoReplyAccessibilityService : AccessibilityService() {
             .lowercase()
     }
 
+    private fun clickableSelfOrParent(node: AccessibilityNodeInfo): AccessibilityNodeInfo? {
+        var current: AccessibilityNodeInfo? = node
+        while (current != null && !current.isClickable) {
+            current = current.parent
+        }
+        return current
+    }
+
     private fun findByViewId(
         node: AccessibilityNodeInfo,
         idFragments: List<String>
     ): AccessibilityNodeInfo? {
         val viewId = node.viewIdResourceName?.lowercase().orEmpty()
-        if (node.isClickable && node.isVisibleToUser && idFragments.any { viewId.contains(it) }) {
-            return node
+        if (node.isVisibleToUser && idFragments.any { viewId.contains(it) }) {
+            clickableSelfOrParent(node)?.let { return it }
         }
         for (i in 0 until node.childCount) {
             val child = node.getChild(i) ?: continue
@@ -401,15 +580,37 @@ class AutoReplyAccessibilityService : AccessibilityService() {
         val desc = node.contentDescription?.toString()?.lowercase().orEmpty()
         val matches = keywords.any { kw -> text.contains(kw) || desc.contains(kw) }
         if (matches && node.isVisibleToUser) {
-            var clickableCandidate: AccessibilityNodeInfo? = node
-            while (clickableCandidate != null && !clickableCandidate.isClickable) {
-                clickableCandidate = clickableCandidate.parent
-            }
-            if (clickableCandidate != null) return clickableCandidate
+            clickableSelfOrParent(node)?.let { return it }
         }
         for (i in 0 until node.childCount) {
             val child = node.getChild(i) ?: continue
             val found = findByText(child, keywords)
+            if (found != null) return found
+        }
+        return null
+    }
+
+    private fun findCaptionInputNode(root: AccessibilityNodeInfo): AccessibilityNodeInfo? {
+        return findEditableByIdOrHint(root, CAPTION_ID_OR_HINT_FRAGMENTS)
+            ?: findEditableInputNode(root)
+    }
+
+    private fun findEditableByIdOrHint(
+        node: AccessibilityNodeInfo,
+        fragments: List<String>
+    ): AccessibilityNodeInfo? {
+        val isEditableField = node.isEditable || node.className?.toString()?.contains("EditText") == true
+        if (isEditableField && node.isVisibleToUser) {
+            val viewId = node.viewIdResourceName?.lowercase().orEmpty()
+            val desc = node.contentDescription?.toString()?.lowercase().orEmpty()
+            val text = node.text?.toString()?.lowercase().orEmpty()
+            if (fragments.any { viewId.contains(it) || desc.contains(it) || text.contains(it) }) {
+                return node
+            }
+        }
+        for (i in 0 until node.childCount) {
+            val child = node.getChild(i) ?: continue
+            val found = findEditableByIdOrHint(child, fragments)
             if (found != null) return found
         }
         return null
@@ -456,6 +657,8 @@ class AutoReplyAccessibilityService : AccessibilityService() {
     }
 
     companion object {
+        private const val TAG = "AutoReplyAccessibility"
+
         @Volatile
         var activeInstance: AutoReplyAccessibilityService? = null
             private set
@@ -472,7 +675,17 @@ class AutoReplyAccessibilityService : AccessibilityService() {
             "conversation_title",
             "chat_name"
         )
+        private val CAPTION_ID_OR_HINT_FRAGMENTS = listOf(
+            "caption",
+            "add_caption",
+            "media_caption",
+            "comment",
+            "entry",
+            "إضافة تعليق",
+            "تعليق"
+        )
         private val BIDI_CONTROL_REGEX = Regex("[\u200E\u200F\u202A-\u202E\u2066-\u2069]")
         private val WHITESPACE_REGEX = Regex("\\s+")
     }
 }
+

@@ -372,6 +372,15 @@ class SA_AutoMate_Integration {
         $limit  = max( 1, min( 8, absint( $request->get_param( 'limit' ) ?: 5 ) ) );
         $is_group = (bool) rest_sanitize_boolean( $request->get_param( 'is_group' ) );
         $incoming_ctx = is_array( $request->get_param( 'active_context' ) ) ? $request->get_param( 'active_context' ) : [];
+        $raw_exclude = $request->get_param( 'exclude_ids' );
+        $exclude_ids = is_array( $raw_exclude )
+            ? array_values( array_unique( array_filter( array_map( 'absint', $raw_exclude ) ) ) )
+            : [];
+        if ( ! empty( $exclude_ids ) ) {
+            $existing_shown = is_array( $incoming_ctx['shown_product_ids'] ?? null ) ? $incoming_ctx['shown_product_ids'] : [];
+            $incoming_ctx['shown_product_ids'] = array_values( array_unique( array_merge( array_map( 'absint', $existing_shown ), $exclude_ids ) ) );
+        }
+        $store_name = function_exists( 'get_bloginfo' ) ? sanitize_text_field( (string) get_bloginfo( 'name' ) ) : '';
 
         $wa_config = self::config();
         $cs = class_exists( 'SA_Customer_Service_Settings' ) ? SA_Customer_Service_Settings::get_config() : [];
@@ -384,7 +393,7 @@ class SA_AutoMate_Integration {
         }
 
         // Category intent & multi-turn disambiguation for Orchestrator (AutoMate AI).
-        if ( '' !== $query && class_exists( 'SA_Category_Intent_Service' ) && SA_Category_Intent_Service::is_available() && in_array( $intent, [ 'CATEGORY_BROWSE', 'CATEGORY_LINK', 'product_search', 'general' ], true ) ) {
+        if ( '' !== $query && class_exists( 'SA_Category_Intent_Service' ) && SA_Category_Intent_Service::is_available() && in_array( $intent, [ 'CATEGORY_BROWSE', 'CATEGORY_LINK', 'product_search', 'product_details', 'MORE_PRODUCTS', 'PRODUCT_COMPARE', 'general' ], true ) ) {
             $cat_res = SA_Category_Intent_Service::process_turn( $query, $incoming_ctx, $wa_config );
             if ( is_array( $cat_res ) && ! empty( $cat_res['handled'] ) ) {
                 $cat_intent = (string) ( $cat_res['intent'] ?? $intent );
@@ -413,6 +422,7 @@ class SA_AutoMate_Integration {
                 return self::respond( [
                     'ok'                => true,
                     'source'            => 'smart_advisor_woocommerce',
+                    'store_name'        => $store_name,
                     'intent'            => $cat_intent,
                     'summary'           => $summary,
                     'facts'             => $cat_facts,
@@ -450,7 +460,7 @@ class SA_AutoMate_Integration {
                     $customer_hints = self::read_personalization_hints( $ck );
                 }
             }
-            $products = self::find_verified_products( $intent, $query, $limit, $customer_hints );
+            $products = self::find_verified_products( $intent, $query, $limit, $customer_hints, $exclude_ids );
         }
 
         $summary = self::build_knowledge_summary( $intent, $facts, $products );
@@ -459,6 +469,7 @@ class SA_AutoMate_Integration {
         return self::respond( [
             'ok'                => true,
             'source'            => 'smart_advisor_woocommerce',
+            'store_name'        => $store_name,
             'intent'            => $intent,
             'summary'           => $summary,
             'facts'             => array_values( $facts ),
@@ -1494,7 +1505,7 @@ class SA_AutoMate_Integration {
         return $facts;
     }
 
-    private static function find_verified_products( $intent, $query, $limit, $customer_hints = [] ) {
+    private static function find_verified_products( $intent, $query, $limit, $customer_hints = [], $exclude_ids = [] ) {
         $args = [
             'status'       => 'publish',
             'limit'        => max( $limit * 3, 12 ),
@@ -1533,16 +1544,21 @@ class SA_AutoMate_Integration {
 
         $products = [];
         $seen_ids = [];
+        $exclude_lookup = ! empty( $exclude_ids ) ? array_flip( array_map( 'absint', $exclude_ids ) ) : [];
         foreach ( (array) $found as $p ) {
             if ( ! $p || ! method_exists( $p, 'get_id' ) ) continue;
             $pid = (int) $p->get_id();
-            if ( isset( $seen_ids[ $pid ] ) ) continue;
+            if ( isset( $seen_ids[ $pid ] ) || isset( $exclude_lookup[ $pid ] ) ) continue;
             if ( ! $p->is_visible() || ! $p->is_purchasable() || ! $p->is_in_stock() ) continue;
             $price_num = (float) $p->get_price();
             if ( $price_num <= 0 ) continue;
             if ( 'offers' === $intent && ! $p->is_on_sale() ) continue;
 
             $seen_ids[ $pid ] = true;
+            $image_id = method_exists( $p, 'get_image_id' ) ? (int) $p->get_image_id() : 0;
+            $image_url = ( $image_id > 0 && function_exists( 'wp_get_attachment_image_url' ) )
+                ? esc_url_raw( (string) wp_get_attachment_image_url( $image_id, 'large' ) )
+                : '';
             $item = [
                 'id'                => $pid,
                 'name'              => $p->get_name(),
@@ -1551,6 +1567,7 @@ class SA_AutoMate_Integration {
                 'regular_price'     => (string) $p->get_regular_price(),
                 'currency'          => function_exists( 'get_woocommerce_currency' ) ? get_woocommerce_currency() : '',
                 'url'               => esc_url_raw( get_permalink( $pid ) ),
+                'image'             => $image_url,
                 'stock_status'      => $p->get_stock_status(),
                 'in_stock'          => true,
                 'on_sale'           => (bool) $p->is_on_sale(),

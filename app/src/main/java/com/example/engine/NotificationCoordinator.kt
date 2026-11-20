@@ -16,6 +16,7 @@ import com.example.network.HttpTransport
 import com.example.network.TokenBucketRateLimiter
 import com.example.network.WebhookClient
 import com.example.network.smartadvisor.SmartAdvisorClient
+import com.example.network.smartadvisor.SmartAdvisorResponseParser
 import com.example.worker.MessageQueueWorker
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
@@ -59,7 +60,8 @@ class NotificationCoordinator internal constructor(
     private val workManager: WorkManager,
     private val aiSettingsPrefs: AiSettingsPrefs? = null,
     private val clockMs: () -> Long = { System.currentTimeMillis() },
-    private val queueScheduler: ((delayMs: Long) -> Unit)? = null
+    private val queueScheduler: ((delayMs: Long) -> Unit)? = null,
+    private val conversationMemoryManager: ConversationMemoryManager? = null
 ) {
     @Inject
     constructor(
@@ -73,7 +75,8 @@ class NotificationCoordinator internal constructor(
         idempotencyGuard: IdempotencyGuard,
         rateLimiter: TokenBucketRateLimiter,
         workManager: WorkManager,
-        aiSettingsPrefs: AiSettingsPrefs
+        aiSettingsPrefs: AiSettingsPrefs,
+        conversationMemoryManager: ConversationMemoryManager
     ) : this(
         autoReplyEngine = autoReplyEngine,
         replyDispatcher = replyDispatcher,
@@ -87,7 +90,8 @@ class NotificationCoordinator internal constructor(
         workManager = workManager,
         aiSettingsPrefs = aiSettingsPrefs,
         clockMs = { System.currentTimeMillis() },
-        queueScheduler = null
+        queueScheduler = null,
+        conversationMemoryManager = conversationMemoryManager
     )
 
     internal constructor(
@@ -116,7 +120,8 @@ class NotificationCoordinator internal constructor(
         workManager = workManager,
         aiSettingsPrefs = null,
         clockMs = clockMs,
-        queueScheduler = queueScheduler
+        queueScheduler = queueScheduler,
+        conversationMemoryManager = null
     )
 
     private data class SentEcho(
@@ -360,10 +365,14 @@ class NotificationCoordinator internal constructor(
                 msg = msg,
                 idempotencyKey = msgKey
             )
-            saEnabled -> smartAdvisorClient.send(
-                msg = msg,
-                idempotencyKey = msgKey
-            )
+            saEnabled -> {
+                val excludeIds = conversationMemoryManager?.getShownProductIds(convKey).orEmpty()
+                smartAdvisorClient.send(
+                    msg = msg,
+                    idempotencyKey = msgKey,
+                    excludeProductIds = excludeIds
+                )
+            }
             else -> {
                 idempotencyGuard.releaseReservation(msgKey)
                 return CoordinatorResult(msgKey, "NO_MATCH")
@@ -377,27 +386,82 @@ class NotificationCoordinator internal constructor(
                 } else {
                     "reply"
                 }
-                val reply = VariableEngine.extractReply(result.body, replyKey)
-                if (reply.isNullOrBlank()) {
+                val parsedSa = if (!webhookEnabled && saEnabled) {
+                    SmartAdvisorResponseParser.parseReplyEndpoint(
+                        body = result.body,
+                        preferredReplyKey = replyKey
+                    )
+                } else {
+                    null
+                }
+                if (parsedSa != null) {
+                    val shownIds = parsedSa.products.mapNotNull { it.productId }
+                    if (shownIds.isNotEmpty()) {
+                        conversationMemoryManager?.recordShownProductIds(convKey, shownIds)
+                    }
+                }
+
+                val isProductImage = parsedSa?.responseType == ResponseType.PRODUCT_IMAGE &&
+                    parsedSa.selectedProduct?.canSendAsImage() == true
+                val selectedProduct = if (isProductImage) parsedSa?.selectedProduct else null
+                val reply = if (isProductImage && selectedProduct != null) {
+                    selectedProduct.buildCaption()
+                } else {
+                    parsedSa?.replyText?.takeIf { it.isNotBlank() }
+                        ?: VariableEngine.extractReply(result.body, replyKey)
+                }
+
+                if (reply.isNullOrBlank() && selectedProduct == null) {
                     idempotencyGuard.markCompleted(msgKey)
                     CoordinatorResult(msgKey, "WEBHOOK_NO_REPLY")
                 } else {
-                    val sendOutcome = replyDispatcher.dispatchReply(
-                        msgKey = msgKey,
-                        targetPackage = payload.packageName,
-                        senderName = payload.senderName,
-                        replyText = reply,
-                        replyAction = payload.replyAction,
-                        contentIntent = payload.contentIntent,
-                        useAccessibilityFallback = useAccessibilityFallback,
-                        directMethodLabel = "Webhook-DirectReply",
-                        accessibilityMethodLabel = "Webhook-Accessibility",
-                        directSendInvoker = payload.directSendInvoker,
-                        contentSendInvoker = payload.contentSendInvoker
-                    )
+                    val textFallback = if (selectedProduct != null) {
+                        parsedSa?.replyText?.takeIf { it.isNotBlank() }
+                            ?: selectedProduct.buildTextFallbackReply()
+                    } else {
+                        reply.orEmpty()
+                    }
+                    val loggedReply = if (selectedProduct != null) {
+                        "[صورة منتج]\n${selectedProduct.buildCaption()}"
+                    } else {
+                        reply.orEmpty()
+                    }
+
+                    val sendOutcome = if (selectedProduct != null) {
+                        replyDispatcher.dispatchProductReply(
+                            msgKey = msgKey,
+                            targetPackage = payload.packageName,
+                            senderName = payload.senderName,
+                            responseType = ResponseType.PRODUCT_IMAGE,
+                            productMessage = selectedProduct,
+                            fallbackTextReply = textFallback,
+                            replyAction = payload.replyAction,
+                            contentIntent = payload.contentIntent,
+                            useAccessibilityFallback = useAccessibilityFallback,
+                            directMethodLabel = "SmartAdvisor-DirectReply",
+                            accessibilityTextMethodLabel = "SmartAdvisor-Accessibility",
+                            accessibilityImageMethodLabel = "SmartAdvisor-ProductImage",
+                            directSendInvoker = payload.directSendInvoker,
+                            contentSendInvoker = payload.contentSendInvoker
+                        )
+                    } else {
+                        replyDispatcher.dispatchReply(
+                            msgKey = msgKey,
+                            targetPackage = payload.packageName,
+                            senderName = payload.senderName,
+                            replyText = textFallback,
+                            replyAction = payload.replyAction,
+                            contentIntent = payload.contentIntent,
+                            useAccessibilityFallback = useAccessibilityFallback,
+                            directMethodLabel = "Webhook-DirectReply",
+                            accessibilityMethodLabel = "Webhook-Accessibility",
+                            directSendInvoker = payload.directSendInvoker,
+                            contentSendInvoker = payload.contentSendInvoker
+                        )
+                    }
                     when (sendOutcome) {
                         is ReplyDispatcher.SendOutcome.Sent -> {
-                            recordOutgoingReplyByKey(convKey, reply)
+                            recordOutgoingReplyByKey(convKey, loggedReply)
                             if (!sendOutcome.isHandoff) {
                                 idempotencyGuard.markCompleted(msgKey)
                             }
@@ -406,7 +470,7 @@ class NotificationCoordinator internal constructor(
                                     senderName = payload.senderName,
                                     packageName = payload.packageName,
                                     incomingMessage = payload.messageText,
-                                    sentReply = reply,
+                                    sentReply = loggedReply,
                                     isGroup = payload.isGroup,
                                     deliveryMethod = sendOutcome.deliveryMethod,
                                     timestamp = now,
@@ -419,7 +483,7 @@ class NotificationCoordinator internal constructor(
                                     }
                                 )
                             )
-                            CoordinatorResult(msgKey, sendOutcome.deliveryMethod, reply, isHandled = true)
+                            CoordinatorResult(msgKey, sendOutcome.deliveryMethod, loggedReply, isHandled = true)
                         }
                         is ReplyDispatcher.SendOutcome.FailedConfirmed -> {
                             idempotencyGuard.markFailedConfirmed(msgKey)

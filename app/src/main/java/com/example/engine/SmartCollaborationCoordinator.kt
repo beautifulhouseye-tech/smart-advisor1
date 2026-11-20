@@ -11,6 +11,7 @@ import com.example.network.ai.AIReplyEngine
 import com.example.network.security.SecretVault
 import com.example.network.security.SensitiveDataRedactor
 import com.example.network.smartadvisor.SmartAdvisorClient
+import com.example.network.smartadvisor.SmartAdvisorResponseParser
 import com.example.worker.MemoryOutboxCoordinator
 import javax.inject.Inject
 import javax.inject.Singleton
@@ -113,7 +114,12 @@ class SmartCollaborationCoordinator(
         val safeFallbackUsed: Boolean = false,
         val redactedError: String? = null,
         val stageLatenciesMs: Map<String, Long> = emptyMap(),
-        val currentTopic: String = ""
+        val currentTopic: String = "",
+        val responseType: ResponseType = ResponseType.TEXT_MESSAGE,
+        val productMessage: ProductMessage? = null,
+        val products: List<ProductMessage> = emptyList(),
+        val storeName: String = "",
+        val fallbackTextReply: String = ""
     )
 
     private data class CollectedToolNote(
@@ -451,11 +457,13 @@ class SmartCollaborationCoordinator(
                             cachedKnowledge
                         } else {
                             val saStart = clockMs()
+                            val shownIdsForConv = conversationMemoryManager.getShownProductIds(conversationKey)
                             smartAdvisorClient.queryKnowledge(
                                 query = queryText,
                                 intent = resolvedIntent,
                                 customerKey = contextEntity.customerKey,
-                                isGroup = input.isGroup
+                                isGroup = input.isGroup,
+                                excludeProductIds = shownIdsForConv
                             ).also { res ->
                                 latencies["smart_advisor_knowledge"] =
                                     (latencies["smart_advisor_knowledge"] ?: 0L) +
@@ -469,7 +477,18 @@ class SmartCollaborationCoordinator(
                         if (knowledge.ok && knowledge.hasVerifiedData) {
                             lastVerifiedKnowledge = knowledge
                             verifiedStoreDataUsed = true
-                            val snippet = buildVerifiedKnowledgeSnippet(knowledge)
+                            val capStoreName = capabilities?.storeName.orEmpty()
+                            val effectiveKnowledge = if (knowledge.storeName.isBlank() && capStoreName.isNotBlank()) {
+                                knowledge.copy(storeName = capStoreName)
+                            } else {
+                                knowledge
+                            }
+                            val parsedKnowledge = effectiveKnowledge.toParsedPayload()
+                            val shownIds = parsedKnowledge.products.mapNotNull { it.productId }
+                            if (shownIds.isNotEmpty()) {
+                                conversationMemoryManager.recordShownProductIds(conversationKey, shownIds)
+                            }
+                            val snippet = buildVerifiedKnowledgeSnippet(effectiveKnowledge)
                             verifiedDataSnippet = listOf(verifiedDataSnippet, snippet)
                                 .filter { it.isNotBlank() }
                                 .joinToString("\n")
@@ -823,8 +842,39 @@ class SmartCollaborationCoordinator(
                 AIReplyEngine.enforceToneAndLength(redacted, aiSettings)
             }
 
+        val effectiveVerified = lastVerifiedKnowledge?.let { lk ->
+            val capStoreName = capabilities?.storeName.orEmpty()
+            if (lk.storeName.isBlank() && capStoreName.isNotBlank()) {
+                lk.copy(storeName = capStoreName)
+            } else {
+                lk
+            }
+        }
+        val parsedKnowledge = effectiveVerified?.toParsedPayload(
+            selectedProductId = currentDecision.selectedProductId
+        )
+        val resolvedResponseType = parsedKnowledge?.responseType ?: ResponseType.TEXT_MESSAGE
+        val resolvedProductMessage = if (resolvedResponseType == ResponseType.PRODUCT_IMAGE) {
+            parsedKnowledge?.selectedProduct
+        } else {
+            null
+        }
+        val resolvedReplyText = if (resolvedResponseType == ResponseType.PRODUCT_IMAGE && resolvedProductMessage != null) {
+            secretVault.redact(resolvedProductMessage.buildCaption())
+                .ifBlank { cleanedReply.orEmpty() }
+                .takeIf { it.isNotBlank() }
+        } else {
+            cleanedReply
+        }
+        val fallbackReply = when {
+            resolvedProductMessage != null -> {
+                cleanedReply?.takeIf { it.isNotBlank() } ?: resolvedProductMessage.buildTextFallbackReply()
+            }
+            else -> cleanedReply.orEmpty()
+        }
+
         return CollaborationOutcome(
-            replyText = cleanedReply,
+            replyText = resolvedReplyText,
             conversationKey = conversationKey,
             usedNewApi = usedNewApiFlag,
             usedPrimaryEngine = pass1Outcome.primaryEngineLabel,
@@ -847,7 +897,12 @@ class SmartCollaborationCoordinator(
             consentRequiredForMemory = consentRequiredFlag,
             redactedError = finalRedactedError,
             stageLatenciesMs = latencies,
-            currentTopic = contextEntity.currentTopic
+            currentTopic = contextEntity.currentTopic,
+            responseType = resolvedResponseType,
+            productMessage = resolvedProductMessage,
+            products = parsedKnowledge?.products.orEmpty(),
+            storeName = parsedKnowledge?.storeName.orEmpty(),
+            fallbackTextReply = fallbackReply
         )
     }
 

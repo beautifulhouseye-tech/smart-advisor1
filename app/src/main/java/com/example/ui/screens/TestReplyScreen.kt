@@ -75,6 +75,7 @@ import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.R
 import com.example.engine.ReplySourceCategory
+import com.example.engine.ResponseType
 import com.example.ui.viewmodel.TestChatMessage
 import com.example.ui.viewmodel.TestReplyUiState
 import com.example.ui.viewmodel.TestReplyViewModel
@@ -400,7 +401,9 @@ private fun ChatMessageBubble(message: TestChatMessage) {
                                 modifier = Modifier.size(16.dp)
                             )
                             Text(
-                                text = message.imageUri,
+                                text = message.productMessage?.productName?.takeIf { it.isNotBlank() }
+                                    ?.let { "صورة المنتج: $it" }
+                                    ?: message.imageUri,
                                 style = MaterialTheme.typography.labelSmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                                 maxLines = 1,
@@ -410,11 +413,18 @@ private fun ChatMessageBubble(message: TestChatMessage) {
                     }
                 }
 
-                if (hasCollaborationTrace) {
+                if (hasCollaborationTrace || message.responseType != ResponseType.TEXT_MESSAGE) {
                     FlowRow(
                         horizontalArrangement = Arrangement.spacedBy(6.dp),
                         verticalArrangement = Arrangement.spacedBy(4.dp)
                     ) {
+                        when (message.responseType) {
+                            ResponseType.PRODUCT_IMAGE -> TraceMiniChip("رسالة صورة + وصف", icon = Icons.Filled.Image)
+                            ResponseType.CATEGORY_LINK -> TraceMiniChip("رابط تصنيف")
+                            ResponseType.PRODUCT_LIST -> TraceMiniChip("قائمة منتجات")
+                            ResponseType.PRODUCT_COMPARISON -> TraceMiniChip("مقارنة منتجات")
+                            ResponseType.TEXT_MESSAGE -> Unit
+                        }
                         if (message.usedNewApi) TraceMiniChip("New API")
                         if (message.switchedToQwen) TraceMiniChip("Fallback: Qwen")
                         if (message.calledSmartAdvisor) TraceMiniChip("أداة: Smart Advisor")

@@ -15,7 +15,13 @@ data class PendingAccessibilityReply(
     val senderName: String,
     val replyText: String,
     val imageUri: String? = null,
-    val createdAtMs: Long = System.currentTimeMillis()
+    val createdAtMs: Long = System.currentTimeMillis(),
+    val responseType: ResponseType = ResponseType.TEXT_MESSAGE,
+    val deliveryState: ImageDeliveryState = ImageDeliveryState.QUEUED,
+    val mediaStoreUri: String? = null,
+    val fallbackTextReply: String = "",
+    val requireCaptionBeforeSend: Boolean = false,
+    val onPreSendImageFailure: (suspend () -> Unit)? = null
 )
 
 data class ServiceConnectionStatus(
@@ -33,6 +39,7 @@ class PendingReplyCoordinator internal constructor(
 
     private val queueLock = Any()
     private val queue = ConcurrentLinkedDeque<PendingAccessibilityReply>()
+    private val imageDeliveryStates = java.util.concurrent.ConcurrentHashMap<String, ImageDeliveryState>()
 
     private val _connectionStatus = MutableStateFlow(ServiceConnectionStatus())
     val connectionStatus: StateFlow<ServiceConnectionStatus> = _connectionStatus.asStateFlow()
@@ -49,10 +56,25 @@ class PendingReplyCoordinator internal constructor(
         _connectionStatus.update { it.copy(lastActiveEventAtMs = clockMs()) }
     }
 
+    fun recordDeliveryState(msgKey: String, state: ImageDeliveryState) {
+        val clean = msgKey.trim()
+        if (clean.isNotEmpty()) {
+            imageDeliveryStates[clean] = state
+        }
+    }
+
+    fun getDeliveryState(msgKey: String): ImageDeliveryState? {
+        val clean = msgKey.trim()
+        return if (clean.isEmpty()) null else imageDeliveryStates[clean]
+    }
+
     fun enqueue(reply: PendingAccessibilityReply) {
         synchronized(queueLock) {
             pruneExpiredLocked()
             queue.addLast(reply)
+            if (reply.msgKey.isNotBlank() && reply.imageUri != null) {
+                imageDeliveryStates[reply.msgKey.trim()] = reply.deliveryState
+            }
         }
     }
 
@@ -100,6 +122,7 @@ class PendingReplyCoordinator internal constructor(
     fun clear() {
         synchronized(queueLock) {
             queue.clear()
+            imageDeliveryStates.clear()
         }
     }
 

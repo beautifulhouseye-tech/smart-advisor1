@@ -42,6 +42,7 @@ class ConversationMemoryManager(
     private val json = Json { ignoreUnknownKeys = true }
     private val sandboxContexts = ConcurrentHashMap<String, ConversationContextEntity>()
     private val pendingHandoffTurns = ConcurrentHashMap<String, StagedAssistantTurn>()
+    private val shownProductIdsByConversation = ConcurrentHashMap<String, MutableList<Long>>()
 
     suspend fun getOrCreateContext(
         conversationKey: String,
@@ -328,8 +329,31 @@ class ConversationMemoryManager(
         return if (prefs.isEmpty()) base else "$base (${prefs.joinToString("، ")})"
     }
 
+    fun recordShownProductIds(conversationKey: String, productIds: List<Long>) {
+        if (conversationKey.isBlank() || productIds.isEmpty()) return
+        val list = shownProductIdsByConversation.getOrPut(conversationKey) { mutableListOf() }
+        synchronized(list) {
+            productIds.forEach { id ->
+                if (id > 0L && id !in list) {
+                    list.add(id)
+                }
+            }
+            if (list.size > 60) {
+                val trimCount = list.size - 60
+                repeat(trimCount) { list.removeAt(0) }
+            }
+        }
+    }
+
+    fun getShownProductIds(conversationKey: String): List<Long> {
+        if (conversationKey.isBlank()) return emptyList()
+        val list = shownProductIdsByConversation[conversationKey] ?: return emptyList()
+        return synchronized(list) { list.toList() }
+    }
+
     fun clearSandboxConversation(conversationKey: String) {
         sandboxContexts.remove(conversationKey)
+        shownProductIdsByConversation.remove(conversationKey)
         pendingHandoffTurns.entries.removeIf { it.value.isSandbox && it.value.conversationKey == conversationKey }
     }
 

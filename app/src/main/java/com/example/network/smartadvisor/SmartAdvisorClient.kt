@@ -65,8 +65,21 @@ class SmartAdvisorClient internal constructor(
         val itemsJson: String = "[]",
         val statusCode: Int = 200,
         val skillDisabled: Boolean = false,
-        val error: String? = null
-    )
+        val error: String? = null,
+        val storeName: String = "",
+        val categoryUrl: String? = null,
+        val suggestedReply: String = ""
+    ) {
+        fun toParsedPayload(selectedProductId: Long? = null): SmartAdvisorResponseParser.ParsedPayload =
+            SmartAdvisorResponseParser.parseKnowledgeItems(
+                itemsJson = itemsJson,
+                storeName = storeName,
+                intent = intent,
+                summary = suggestedReply.ifBlank { summary },
+                categoryUrl = categoryUrl,
+                selectedProductId = selectedProductId
+            )
+    }
 
     data class SaMemoryPayload(
         val summary: String = "",
@@ -134,19 +147,36 @@ class SmartAdvisorClient internal constructor(
         return mapOf(HEADER_API_KEY to apiKey)
     }
 
-    fun buildBody(msg: IncomingMessage): String {
+    fun buildBody(
+        msg: IncomingMessage,
+        excludeProductIds: List<Long> = emptyList()
+    ): String {
         return buildJsonObject {
             put("app", JsonPrimitive(msg.app))
             put("sender", JsonPrimitive(msg.sender))
             put("message", JsonPrimitive(msg.message))
             put("group_name", JsonPrimitive(msg.groupName))
             put("phone", JsonPrimitive(msg.phone))
+            if (excludeProductIds.isNotEmpty()) {
+                put(
+                    "active_context",
+                    buildJsonObject {
+                        put(
+                            "shown_product_ids",
+                            buildJsonArray {
+                                excludeProductIds.distinct().forEach { add(JsonPrimitive(it)) }
+                            }
+                        )
+                    }
+                )
+            }
         }.toString()
     }
 
     suspend fun send(
         msg: IncomingMessage,
-        idempotencyKey: String? = null
+        idempotencyKey: String? = null,
+        excludeProductIds: List<Long> = emptyList()
     ): HttpTransport.Result {
         val url = endpoint()
         if (url.isBlank()) {
@@ -160,7 +190,7 @@ class SmartAdvisorClient internal constructor(
             url = url,
             method = "POST",
             headers = buildHeaders(),
-            body = buildBody(msg),
+            body = buildBody(msg, excludeProductIds),
             contentType = "JSON",
             maxAttempts = effectiveAttempts(),
             timeoutSeconds = effectiveTimeoutSeconds(),
@@ -238,7 +268,8 @@ class SmartAdvisorClient internal constructor(
         query: String,
         intent: String,
         customerKey: String = "",
-        isGroup: Boolean = false
+        isGroup: Boolean = false,
+        excludeProductIds: List<Long> = emptyList()
     ): SaKnowledgeResponse {
         val base = assistantBaseUrl()
         if (base.isBlank()) {
@@ -257,6 +288,14 @@ class SmartAdvisorClient internal constructor(
             put("intent", JsonPrimitive(normalizedIntent))
             if (customerKey.isNotBlank()) put("customer_key", JsonPrimitive(customerKey))
             put("is_group", JsonPrimitive(isGroup))
+            if (excludeProductIds.isNotEmpty()) {
+                put(
+                    "exclude_ids",
+                    buildJsonArray {
+                        excludeProductIds.distinct().forEach { add(JsonPrimitive(it)) }
+                    }
+                )
+            }
         }.toString()
 
         val result = transport.execute(
@@ -460,7 +499,7 @@ class SmartAdvisorClient internal constructor(
         return runCatching {
             val obj = json.parseToJsonElement(body).jsonObject
             val dataObj = (obj["data"] as? JsonObject) ?: obj
-            val itemsElement = dataObj["items"] ?: dataObj["products"] ?: obj["items"]
+            val itemsElement = dataObj["items"] ?: dataObj["products"] ?: obj["items"] ?: obj["products"]
             val itemsJson = (itemsElement as? JsonArray)?.toString() ?: "[]"
             val facts = ((dataObj["facts"] ?: obj["facts"]) as? JsonArray)
                 ?.mapNotNull { it.jsonPrimitive.contentOrNull?.trim()?.takeIf(String::isNotEmpty) }
@@ -470,6 +509,10 @@ class SmartAdvisorClient internal constructor(
                 ?.jsonPrimitive?.booleanOrNull
             val hasItemsOrFacts = itemsJson != "[]" || facts.isNotEmpty() || summary.isNotBlank()
             val hasVerified = explicitVerified ?: hasItemsOrFacts
+            val storeName = (obj["store_name"] ?: dataObj["store_name"])?.jsonPrimitive?.contentOrNull?.trim().orEmpty()
+            val categoryUrl = (obj["category_url"] ?: dataObj["category_url"])?.jsonPrimitive?.contentOrNull?.trim()
+                ?.takeIf { it.isNotEmpty() }
+            val suggestedReply = (obj["suggested_reply"] ?: dataObj["suggested_reply"])?.jsonPrimitive?.contentOrNull?.trim().orEmpty()
 
             SaKnowledgeResponse(
                 ok = obj["ok"]?.jsonPrimitive?.booleanOrNull ?: true,
@@ -478,7 +521,10 @@ class SmartAdvisorClient internal constructor(
                 summary = summary,
                 facts = facts,
                 itemsJson = itemsJson,
-                statusCode = code
+                statusCode = code,
+                storeName = storeName,
+                categoryUrl = categoryUrl,
+                suggestedReply = suggestedReply
             )
         }.getOrElse {
             SaKnowledgeResponse(
@@ -599,8 +645,19 @@ class SmartAdvisorClient internal constructor(
             "general"
         )
 
+        private val UPPERCASE_ASSISTANT_INTENTS = setOf(
+            "CATEGORY_BROWSE",
+            "CATEGORY_LINK",
+            "MORE_PRODUCTS",
+            "PRODUCT_COMPARE",
+            "PRODUCT_COMPARISON"
+        )
+
         fun normalizeKnowledgeIntent(rawIntent: String): String {
-            val cleaned = rawIntent.trim().lowercase()
+            val trimmed = rawIntent.trim()
+            val upper = trimmed.uppercase()
+            if (upper in UPPERCASE_ASSISTANT_INTENTS) return upper
+            val cleaned = trimmed.lowercase()
             return if (cleaned in SUPPORTED_KNOWLEDGE_INTENTS) cleaned else "general"
         }
     }

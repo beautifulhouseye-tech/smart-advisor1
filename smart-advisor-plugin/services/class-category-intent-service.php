@@ -1215,8 +1215,32 @@ class SA_Category_Intent_Service {
         if ( '' !== $url ) $lines[] = '🔗 ' . $url;
         $lines[] = 'هل ترغب في مقارنته مع منتج آخر أم عرض المزيد؟';
 
+        $image_id    = method_exists( $product, 'get_image_id' ) ? (int) $product->get_image_id() : 0;
+        $image_url   = ( $image_id > 0 && function_exists( 'wp_get_attachment_image_url' ) )
+            ? esc_url_raw( (string) wp_get_attachment_image_url( $image_id, 'large' ) )
+            : '';
+        $price_num   = method_exists( $product, 'get_price' ) ? (float) $product->get_price() : 0.0;
+        $currency    = function_exists( 'get_woocommerce_currency' ) ? get_woocommerce_currency() : '';
+
         $ctx['last_intent'] = self::INTENT_PRODUCT_DETAILS;
-        return self::make_result( self::INTENT_PRODUCT_DETAILS, implode( "\n", $lines ), $ctx, false, [ [ 'id' => $target_id, 'name' => $name, 'price' => $price, 'url' => $url ] ] );
+        return self::make_result(
+            self::INTENT_PRODUCT_DETAILS,
+            implode( "\n", $lines ),
+            $ctx,
+            false,
+            [
+                [
+                    'id'                => $target_id,
+                    'name'              => $name,
+                    'price'             => $price,
+                    'price_numeric'     => $price_num,
+                    'currency'          => $currency,
+                    'short_description' => $desc,
+                    'image'             => $image_url,
+                    'url'               => $url,
+                ],
+            ]
+        );
     }
 
     private static function format_product_list_reply( $listed, $ctx, $config, $exact_match, $has_more, $is_more_page = false ) {

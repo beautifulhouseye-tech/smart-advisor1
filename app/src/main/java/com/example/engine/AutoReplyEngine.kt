@@ -283,7 +283,26 @@ class AutoReplyEngine internal constructor(
         val textContent = replyToSend.orEmpty()
         var finalOutcome: ReplyDispatcher.SendOutcome? = null
 
-        if (ruleReplyType == ReplyRuleEntity.REPLY_TYPE_IMAGE && ruleImageUri != null) {
+        if (decision.responseType == ResponseType.PRODUCT_IMAGE &&
+            decision.productMessage?.canSendAsImage() == true
+        ) {
+            finalOutcome = replyDispatcher.dispatchProductReply(
+                msgKey = incoming.msgKey,
+                targetPackage = incoming.packageName,
+                senderName = incoming.senderName,
+                responseType = ResponseType.PRODUCT_IMAGE,
+                productMessage = decision.productMessage,
+                fallbackTextReply = decision.fallbackTextReply.ifBlank { textContent },
+                replyAction = incoming.replyAction,
+                contentIntent = incoming.contentIntent,
+                useAccessibilityFallback = settings.useAccessibilityFallback,
+                directMethodLabel = "DirectReply",
+                accessibilityTextMethodLabel = "Accessibility",
+                accessibilityImageMethodLabel = "Accessibility-ProductImage",
+                directSendInvoker = incoming.directSendInvoker,
+                contentSendInvoker = incoming.contentSendInvoker
+            )
+        } else if (ruleReplyType == ReplyRuleEntity.REPLY_TYPE_IMAGE && ruleImageUri != null) {
             val imageMethod = dispatchImageViaAccessibility(incoming, ruleImageUri, "")
             finalOutcome = if (imageMethod != null) {
                 ReplyDispatcher.SendOutcome.Sent(imageMethod)
@@ -328,10 +347,12 @@ class AutoReplyEngine internal constructor(
                         app = incoming.packageName
                     )
                 }
-                val rawReply = if (ruleReplyType == ReplyRuleEntity.REPLY_TYPE_IMAGE) {
-                    "[صورة] $textContent".trim()
-                } else {
-                    textContent
+                val rawReply = when {
+                    decision.responseType == ResponseType.PRODUCT_IMAGE ->
+                        decision.displayReplyText.ifBlank { "[صورة منتج]\n$textContent".trim() }
+                    ruleReplyType == ReplyRuleEntity.REPLY_TYPE_IMAGE ->
+                        "[صورة] $textContent".trim()
+                    else -> textContent
                 }
                 val safeLoggedReply = SensitiveDataRedactor.scrub(rawReply, secretVault)
 

@@ -6,7 +6,9 @@ import com.example.data.preferences.AiSettingsPrefs
 import com.example.data.repository.AutoMateRepository
 import com.example.data.repository.ServerConfigRepository
 import com.example.data.security.SmartAdvisorPrefs
+import com.example.engine.ProductMessage
 import com.example.engine.ReplySourceCategory
+import com.example.engine.ResponseType
 import com.example.engine.UnifiedReplyTester
 import com.example.engine.UnifiedTestResult
 import dagger.hilt.android.lifecycle.HiltViewModel
@@ -49,7 +51,9 @@ data class TestChatMessage(
     val memoryUpdated: Boolean = false,
     val needsHuman: Boolean = false,
     val stageLatenciesMs: Map<String, Long> = emptyMap(),
-    val redactedError: String? = null
+    val redactedError: String? = null,
+    val responseType: ResponseType = ResponseType.TEXT_MESSAGE,
+    val productMessage: ProductMessage? = null
 )
 
 data class TestReplyUiState(
@@ -210,7 +214,9 @@ class TestReplyViewModel internal constructor(
                 memoryUpdated = result.memoryUpdated,
                 needsHuman = result.needsHuman,
                 stageLatenciesMs = result.stageLatenciesMs,
-                redactedError = result.redactedError
+                redactedError = result.redactedError,
+                responseType = result.responseType,
+                productMessage = result.productMessage
             )
 
             _uiState.update { current ->

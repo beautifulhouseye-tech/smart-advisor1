@@ -21,6 +21,7 @@ import com.example.network.HttpTransport
 import com.example.network.TokenBucketRateLimiter
 import com.example.network.WebhookClient
 import com.example.network.security.SecretVault
+import okhttp3.OkHttpClient
 import dagger.Module
 import dagger.Provides
 import dagger.hilt.InstallIn
@@ -99,6 +100,10 @@ object AppModule {
     @Provides
     @Singleton
     fun provideHttpTransport(): HttpTransport = HttpTransport()
+
+    @Provides
+    @Singleton
+    fun provideOkHttpClient(): OkHttpClient = HttpTransport.defaultClient()
 
     @Provides
     @Singleton

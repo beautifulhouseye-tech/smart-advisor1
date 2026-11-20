@@ -17,6 +17,7 @@ import com.example.network.ai.AIReplyEngine
 import com.example.network.security.SecretVault
 import com.example.network.security.SensitiveDataRedactor
 import com.example.network.smartadvisor.SmartAdvisorClient
+import com.example.network.smartadvisor.SmartAdvisorResponseParser
 import javax.inject.Inject
 import javax.inject.Singleton
 
@@ -114,7 +115,12 @@ class UnifiedSmartReplyService internal constructor(
         val memoryUpdated: Boolean = false,
         val needsHuman: Boolean = false,
         val stageLatenciesMs: Map<String, Long> = emptyMap(),
-        val redactedError: String? = null
+        val redactedError: String? = null,
+        val responseType: ResponseType = ResponseType.TEXT_MESSAGE,
+        val productMessage: ProductMessage? = null,
+        val products: List<ProductMessage> = emptyList(),
+        val fallbackTextReply: String = "",
+        val storeName: String = ""
     )
 
     suspend fun resolve(request: Request): Decision {
@@ -350,12 +356,26 @@ class UnifiedSmartReplyService internal constructor(
                         else ->
                             collab.activeEngine.ifBlank { "الذكاء الاصطناعي" }
                     }
+                    val isProductImage = collab.responseType == ResponseType.PRODUCT_IMAGE &&
+                        collab.productMessage?.canSendAsImage() == true
+                    val finalReplyText = if (isProductImage) {
+                        collab.productMessage!!.buildCaption().ifBlank { collab.replyText }
+                    } else {
+                        collab.replyText
+                    }
+                    val displayText = if (isProductImage) {
+                        "[صورة منتج]\n$finalReplyText"
+                    } else {
+                        finalReplyText
+                    }
                     return Decision(
                         matched = true,
-                        replyText = collab.replyText,
-                        displayReplyText = collab.replyText,
+                        replyText = finalReplyText,
+                        displayReplyText = displayText,
                         sourceLabel = label,
                         sourceCategory = category,
+                        replyType = if (isProductImage) ReplyRuleEntity.REPLY_TYPE_BOTH else ReplyRuleEntity.REPLY_TYPE_TEXT,
+                        imageUri = if (isProductImage) collab.productMessage?.imageUrl else null,
                         evaluatedPath = evaluated,
                         latencyMs = elapsed(startMs),
                         conversationKey = collab.conversationKey,
@@ -378,7 +398,12 @@ class UnifiedSmartReplyService internal constructor(
                         memoryUpdated = collab.memoryUpdated,
                         needsHuman = collab.needsHuman,
                         stageLatenciesMs = collab.stageLatenciesMs,
-                        redactedError = collab.redactedError
+                        redactedError = collab.redactedError,
+                        responseType = collab.responseType,
+                        productMessage = collab.productMessage,
+                        products = collab.products,
+                        fallbackTextReply = collab.fallbackTextReply.ifBlank { finalReplyText },
+                        storeName = collab.storeName
                     )
                 }
             } else {
@@ -511,9 +536,11 @@ class UnifiedSmartReplyService internal constructor(
             if (saStandaloneEligible && smartAdvisorClient != null) {
                 evaluated += "Smart Advisor"
                 val msg = buildIncomingMessage(request, cleanMessage)
+                val shownIds = conversationMemoryManager?.getShownProductIds(resolvedConvKey).orEmpty()
                 val result = smartAdvisorClient.send(
                     msg = msg,
-                    idempotencyKey = if (request.isSandbox) "test-preview-$startMs" else request.msgKey
+                    idempotencyKey = if (request.isSandbox) "test-preview-$startMs" else request.msgKey,
+                    excludeProductIds = shownIds
                 )
                 return mapExternalResult(
                     result = result,
@@ -669,6 +696,67 @@ class UnifiedSmartReplyService internal constructor(
     ): Decision {
         return when (result) {
             is HttpTransport.Result.Success -> {
+                if (successCategory == ReplySourceCategory.SMART_ADVISOR) {
+                    val parsed = SmartAdvisorResponseParser.parseReplyEndpoint(
+                        body = result.body,
+                        preferredReplyKey = replyKey
+                    )
+                    if (parsed != null) {
+                        val shownIds = parsed.products.mapNotNull { it.productId }
+                        if (shownIds.isNotEmpty()) {
+                            conversationMemoryManager?.recordShownProductIds(conversationKey, shownIds)
+                        }
+                        if (parsed.responseType == ResponseType.PRODUCT_IMAGE && parsed.selectedProduct != null) {
+                            val caption = SensitiveDataRedactor.scrub(
+                                parsed.selectedProduct.buildCaption(),
+                                secretVault
+                            )
+                            val fallbackText = SensitiveDataRedactor.scrub(
+                                parsed.replyText.ifBlank { parsed.selectedProduct.buildTextFallbackReply() },
+                                secretVault
+                            )
+                            return Decision(
+                                matched = true,
+                                replyText = caption,
+                                displayReplyText = "[صورة منتج]\n$caption",
+                                sourceLabel = successLabel,
+                                sourceCategory = successCategory,
+                                replyType = ReplyRuleEntity.REPLY_TYPE_BOTH,
+                                imageUri = parsed.selectedProduct.imageUrl,
+                                evaluatedPath = evaluated,
+                                latencyMs = elapsedMs,
+                                conversationKey = conversationKey,
+                                calledSmartAdvisor = true,
+                                detectedIntent = parsed.intent,
+                                responseType = ResponseType.PRODUCT_IMAGE,
+                                productMessage = parsed.selectedProduct,
+                                products = parsed.products,
+                                fallbackTextReply = fallbackText,
+                                storeName = parsed.storeName
+                            )
+                        }
+                        if (parsed.replyText.isNotBlank()) {
+                            val scrubbed = SensitiveDataRedactor.scrub(parsed.replyText, secretVault)
+                            return Decision(
+                                matched = true,
+                                replyText = scrubbed,
+                                displayReplyText = scrubbed,
+                                sourceLabel = successLabel,
+                                sourceCategory = successCategory,
+                                evaluatedPath = evaluated,
+                                latencyMs = elapsedMs,
+                                conversationKey = conversationKey,
+                                calledSmartAdvisor = true,
+                                detectedIntent = parsed.intent,
+                                responseType = parsed.responseType,
+                                products = parsed.products,
+                                fallbackTextReply = scrubbed,
+                                storeName = parsed.storeName
+                            )
+                        }
+                    }
+                }
+
                 val reply = VariableEngine.extractReply(result.body, replyKey)
                 if (!reply.isNullOrBlank()) {
                     val scrubbed = SensitiveDataRedactor.scrub(reply, secretVault)

@@ -52,7 +52,9 @@ data class UnifiedTestResult(
     val memoryUpdated: Boolean = false,
     val needsHuman: Boolean = false,
     val stageLatenciesMs: Map<String, Long> = emptyMap(),
-    val redactedError: String? = null
+    val redactedError: String? = null,
+    val responseType: ResponseType = ResponseType.TEXT_MESSAGE,
+    val productMessage: ProductMessage? = null
 )
 
 @Singleton
@@ -229,7 +231,9 @@ class UnifiedReplyTester internal constructor(
             memoryUpdated = decision.memoryUpdated,
             needsHuman = decision.needsHuman,
             stageLatenciesMs = decision.stageLatenciesMs,
-            redactedError = decision.redactedError
+            redactedError = decision.redactedError,
+            responseType = decision.responseType,
+            productMessage = decision.productMessage
         )
     }
 
