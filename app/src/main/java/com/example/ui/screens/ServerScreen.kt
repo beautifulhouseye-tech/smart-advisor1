@@ -80,6 +80,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
@@ -288,17 +289,19 @@ fun ServerScreen(
                                     .testTag("server_tool_description_input")
                             )
 
-                            OutlinedTextField(
-                                value = config.url,
-                                onValueChange = viewModel::updateUrl,
-                                label = { Text("رابط الخادم (HTTPS URL)") },
-                                placeholder = { Text("https://api.example.com/webhook") },
-                                singleLine = true,
-                                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri),
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .testTag("server_url_input")
-                            )
+                            CompositionLocalProvider(LocalLayoutDirection provides LayoutDirection.Ltr) {
+                                OutlinedTextField(
+                                    value = config.url,
+                                    onValueChange = viewModel::updateUrl,
+                                    label = { Text("رابط الخادم (HTTPS URL)") },
+                                    placeholder = { Text("https://www.777736225.com/wp-json/smart-advisor/v1/whatsapp/reply") },
+                                    singleLine = true,
+                                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri),
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .testTag("server_url_input")
+                                )
+                            }
 
                             Row(
                                 modifier = Modifier.fillMaxWidth(),
@@ -324,36 +327,38 @@ fun ServerScreen(
                                 )
                             }
 
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.spacedBy(10.dp)
-                            ) {
-                                OutlinedTextField(
-                                    value = config.timeoutSeconds.toString(),
-                                    onValueChange = { raw ->
-                                        val parsed = raw.filter { it.isDigit() }.toIntOrNull()
-                                        if (parsed != null) viewModel.updateTimeout(parsed)
-                                    },
-                                    label = { Text("المهلة (ثانية)") },
-                                    singleLine = true,
-                                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                                    modifier = Modifier
-                                        .weight(1f)
-                                        .testTag("server_timeout_input")
-                                )
-                                OutlinedTextField(
-                                    value = config.retryCount.toString(),
-                                    onValueChange = { raw ->
-                                        val parsed = raw.filter { it.isDigit() }.toIntOrNull()
-                                        if (parsed != null) viewModel.updateRetry(parsed)
-                                    },
-                                    label = { Text("إعادة المحاولة") },
-                                    singleLine = true,
-                                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                                    modifier = Modifier
-                                        .weight(1f)
-                                        .testTag("server_retry_input")
-                                )
+                            CompositionLocalProvider(LocalLayoutDirection provides LayoutDirection.Ltr) {
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                                ) {
+                                    OutlinedTextField(
+                                        value = config.timeoutSeconds.toString(),
+                                        onValueChange = { raw ->
+                                            val parsed = raw.filter { it.isDigit() }.toIntOrNull()
+                                            if (parsed != null) viewModel.updateTimeout(parsed)
+                                        },
+                                        label = { Text("المهلة (ثانية)") },
+                                        singleLine = true,
+                                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                                        modifier = Modifier
+                                            .weight(1f)
+                                            .testTag("server_timeout_input")
+                                    )
+                                    OutlinedTextField(
+                                        value = config.retryCount.toString(),
+                                        onValueChange = { raw ->
+                                            val parsed = raw.filter { it.isDigit() }.toIntOrNull()
+                                            if (parsed != null) viewModel.updateRetry(parsed)
+                                        },
+                                        label = { Text("إعادة المحاولة") },
+                                        singleLine = true,
+                                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                                        modifier = Modifier
+                                            .weight(1f)
+                                            .testTag("server_retry_input")
+                                    )
+                                }
                             }
 
                             SimpleDropdownSelector(
@@ -468,16 +473,18 @@ fun ServerScreen(
                                 text = "مفتاح استخراج الرد (Response Reply Key)",
                                 style = MaterialTheme.typography.titleMedium
                             )
-                            OutlinedTextField(
-                                value = config.responseReplyKey,
-                                onValueChange = viewModel::updateReplyKey,
-                                label = { Text("مسار الرد في استجابة JSON") },
-                                placeholder = { Text("reply أو data.reply أو choices[0].text") },
-                                singleLine = true,
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .testTag("server_reply_key_input")
-                            )
+                            CompositionLocalProvider(LocalLayoutDirection provides LayoutDirection.Ltr) {
+                                OutlinedTextField(
+                                    value = config.responseReplyKey,
+                                    onValueChange = viewModel::updateReplyKey,
+                                    label = { Text("مسار الرد في استجابة JSON") },
+                                    placeholder = { Text("reply أو data.reply أو choices[0].text") },
+                                    singleLine = true,
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .testTag("server_reply_key_input")
+                                )
+                            }
                             Text(
                                 text = "يدعم المسارات المتداخلة مثل data.reply ومؤشرات المصفوفات مثل choices[0].text.",
                                 style = MaterialTheme.typography.bodyMedium,
@@ -564,7 +571,7 @@ fun ServerScreen(
                                         modifier = Modifier.size(18.dp)
                                     )
                                     Spacer(modifier = Modifier.width(6.dp))
-                                    Text("اختبار الاتصال")
+                                    Text("اختبار الاتصال", maxLines = 1, overflow = TextOverflow.Ellipsis)
                                 }
                             }
 
@@ -582,7 +589,7 @@ fun ServerScreen(
                                     modifier = Modifier.size(18.dp)
                                 )
                                 Spacer(modifier = Modifier.width(6.dp))
-                                Text("اختبار نتيجة الأداة")
+                                Text("اختبار الأداة", maxLines = 1, overflow = TextOverflow.Ellipsis)
                             }
                         }
 

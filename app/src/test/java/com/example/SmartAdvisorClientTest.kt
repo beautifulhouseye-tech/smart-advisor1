@@ -2,10 +2,12 @@ package com.example
 
 import android.content.Context
 import androidx.test.core.app.ApplicationProvider
+import com.example.data.security.SmartAdvisorPrefs
 import com.example.engine.IncomingMessage
 import com.example.network.HttpTransport
 import com.example.network.security.SecretVault
 import com.example.network.smartadvisor.SmartAdvisorClient
+import com.example.ui.viewmodel.SaSettingsViewModel
 import kotlinx.coroutines.test.runTest
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.jsonObject
@@ -207,5 +209,48 @@ class SmartAdvisorClientTest {
             transport.lastUrl
         )
         assertEquals("msg-account-789", transport.lastIdempotencyKey)
+    }
+
+    @Test
+    fun `SmartAdvisorPrefs uses 777736225 default endpoint in runtime mode while keeping overridePrefs empty`() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val emptyOverride = context.getSharedPreferences("sa_prefs_iso_${System.nanoTime()}", Context.MODE_PRIVATE)
+        val isolatedPrefs = SmartAdvisorPrefs(context, emptyOverride)
+        assertEquals("", isolatedPrefs.baseUrl)
+
+        val runtimeLikeStore = context.getSharedPreferences("sa_prefs_rt_${System.nanoTime()}", Context.MODE_PRIVATE)
+        val runtimePrefs = SmartAdvisorPrefs(context, runtimeLikeStore, useRuntimeDefaultUrl = true)
+        assertEquals(SmartAdvisorPrefs.DEFAULT_BASE_URL, runtimePrefs.baseUrl)
+        assertEquals(
+            "https://www.777736225.com/wp-json/smart-advisor/v1/whatsapp/reply",
+            runtimePrefs.baseUrl
+        )
+
+        val client = SmartAdvisorClient(RecordingTransport(), runtimePrefs, createVault())
+        assertEquals(SmartAdvisorPrefs.DEFAULT_BASE_URL, client.endpoint())
+        assertEquals(
+            "https://www.777736225.com/wp-json/smart-advisor/v1/whatsapp/assistant",
+            client.assistantBaseUrl()
+        )
+    }
+
+    @Test
+    fun `SaSettingsViewModel pre-fills default endpoint and restoreDefaultUrl restores it`() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val sp = context.getSharedPreferences("sa_vm_${System.nanoTime()}", Context.MODE_PRIVATE)
+        val prefs = SmartAdvisorPrefs(context, sp)
+        val vault = createVault()
+        val client = SmartAdvisorClient(RecordingTransport(), prefs, vault)
+
+        val vm = SaSettingsViewModel(prefs, client, vault)
+        assertEquals(SmartAdvisorPrefs.DEFAULT_BASE_URL, vm.baseUrl.value)
+
+        vm.updateBaseUrl("https://custom.store.example.com/wp-json/smart-advisor/v1/whatsapp/reply")
+        vm.save()
+        assertEquals("https://custom.store.example.com/wp-json/smart-advisor/v1/whatsapp/reply", prefs.baseUrl)
+
+        vm.restoreDefaultUrl()
+        assertEquals(SmartAdvisorPrefs.DEFAULT_BASE_URL, vm.baseUrl.value)
+        assertEquals(SmartAdvisorPrefs.DEFAULT_BASE_URL, prefs.baseUrl)
     }
 }

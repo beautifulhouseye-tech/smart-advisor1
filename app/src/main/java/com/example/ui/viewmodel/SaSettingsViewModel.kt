@@ -20,7 +20,7 @@ class SaSettingsViewModel @Inject constructor(
     private val vault: SecretVault
 ) : ViewModel() {
 
-    private val _baseUrl = MutableStateFlow(prefs.baseUrl)
+    private val _baseUrl = MutableStateFlow(prefs.baseUrl.ifBlank { SmartAdvisorPrefs.DEFAULT_BASE_URL })
     val baseUrl: StateFlow<String> = _baseUrl.asStateFlow()
 
     private val _apiKey = MutableStateFlow(prefs.apiKeyRef)
@@ -50,6 +50,16 @@ class SaSettingsViewModel @Inject constructor(
         _baseUrl.value = url
     }
 
+    fun restoreDefaultUrl() {
+        _baseUrl.value = SmartAdvisorPrefs.DEFAULT_BASE_URL
+        prefs.saveCredentials(
+            baseUrl = SmartAdvisorPrefs.DEFAULT_BASE_URL,
+            apiKeyRef = _apiKey.value,
+            enabled = _enabled.value
+        )
+        _saveStatus.value = "تمت استعادة الرابط الافتراضي لـ Smart Advisor"
+    }
+
     fun updateApiKey(key: String) {
         val trimmed = key.trim()
         if (trimmed.isEmpty()) {
@@ -65,18 +75,35 @@ class SaSettingsViewModel @Inject constructor(
         _enabled.value = enabled
     }
 
+    fun setEnabledAndSave(enabled: Boolean) {
+        _enabled.value = enabled
+        val effectiveUrl = _baseUrl.value.ifBlank { SmartAdvisorPrefs.DEFAULT_BASE_URL }
+        _baseUrl.value = effectiveUrl
+        prefs.saveCredentials(
+            baseUrl = effectiveUrl,
+            apiKeyRef = _apiKey.value,
+            enabled = enabled
+        )
+        _saveStatus.value = if (enabled) {
+            "تم تفعيل المحرك الرئيسي Smart Advisor"
+        } else {
+            "تم إيقاف المحرك الرئيسي Smart Advisor"
+        }
+    }
+
     fun hasStoredApiKey(): Boolean {
         val ref = _apiKey.value.ifBlank { SA_API_KEY_REF }
         return vault.get(ref).isNotEmpty()
     }
 
     fun save() {
+        val effectiveUrl = _baseUrl.value.ifBlank { SmartAdvisorPrefs.DEFAULT_BASE_URL }
         prefs.saveCredentials(
-            baseUrl = _baseUrl.value,
+            baseUrl = effectiveUrl,
             apiKeyRef = _apiKey.value,
             enabled = _enabled.value
         )
-        _baseUrl.value = prefs.baseUrl
+        _baseUrl.value = prefs.baseUrl.ifBlank { SmartAdvisorPrefs.DEFAULT_BASE_URL }
         _apiKey.value = prefs.apiKeyRef
         _enabled.value = prefs.enabled
         _saveStatus.value = "تم حفظ إعدادات Smart Advisor بنجاح"

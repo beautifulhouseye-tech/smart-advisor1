@@ -14,7 +14,6 @@ import com.example.data.preferences.ContactFilterMode
 import com.example.data.repository.AutoMateRepository
 import com.example.driving.DrivingModeManager
 import com.example.engine.PendingReplyCoordinator
-import com.example.engine.RuleMatcher
 import com.example.engine.ServiceConnectionStatus
 import com.example.service.AutoReplyKeepAliveService
 import com.example.service.ServiceStatusHelper
@@ -324,22 +323,6 @@ class MainViewModel @Inject constructor(
         viewModelScope.launch {
             repository.clearReplyLogs()
             statusMessageFlow.value = "تم مسح سجل الردود"
-        }
-    }
-
-    fun simulateReplyForMessage(sampleMessage: String): Pair<String, String?> {
-        val state = uiState.value
-        if (state.settings.isDrivingModeEnabled) {
-            return "وضع القيادة" to state.settings.drivingModeReplyText
-        }
-        val matched = RuleMatcher.findBestMatch(sampleMessage, state.rules)
-        return if (matched != null) {
-            val linked = matched.templateId?.let { tid -> state.templates.firstOrNull { it.id == tid } }
-            val text = linked?.body ?: matched.replyText
-            val label = if (linked != null) "قاعدة: ${matched.keyword} (${linked.title})" else "قاعدة: ${matched.keyword}"
-            label to text
-        } else {
-            "لا يوجد تطابق" to null
         }
     }
 

@@ -9,6 +9,7 @@ import com.example.data.local.entity.RequestField
 import com.example.data.local.entity.ServerConfigEntity
 import com.example.data.local.entity.WebhookMode
 import com.example.data.repository.ServerConfigRepository
+import com.example.data.security.SmartAdvisorPrefs
 import com.example.engine.IncomingMessage
 import com.example.engine.VariableEngine
 import com.example.network.HttpTransport
@@ -471,7 +472,7 @@ class ServerViewModel @Inject constructor(
         return ServerConfigEntity(
             id = 1,
             isEnabled = false,
-            url = "https://example.com/webhook",
+            url = SmartAdvisorPrefs.DEFAULT_BASE_URL,
             method = "POST",
             contentType = "JSON",
             headersJson = json.encodeToString(defaultHeaders),

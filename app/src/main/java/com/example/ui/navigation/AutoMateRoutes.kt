@@ -9,6 +9,9 @@ data object HomeRoute
 data object RulesRoute
 
 @Serializable
+data object ToolsAndMemoryRoute
+
+@Serializable
 data object SettingsRoute
 
 @Serializable

@@ -24,10 +24,11 @@ data class SmartAdvisorCredentials(
 @Singleton
 class SmartAdvisorPrefs internal constructor(
     context: Context,
-    private val overridePrefs: SharedPreferences?
+    private val overridePrefs: SharedPreferences?,
+    private val useRuntimeDefaultUrl: Boolean = (overridePrefs == null)
 ) {
     @Inject
-    constructor(@ApplicationContext context: Context) : this(context, null)
+    constructor(@ApplicationContext context: Context) : this(context, null, true)
 
     private val encryptedPrefs: SharedPreferences by lazy {
         overridePrefs ?: run {
@@ -49,7 +50,7 @@ class SmartAdvisorPrefs internal constructor(
     val credentialsFlow: StateFlow<SmartAdvisorCredentials> = _credentialsFlow.asStateFlow()
 
     var baseUrl: String
-        get() = encryptedPrefs.getString(KEY_BASE_URL, "").orEmpty()
+        get() = resolveStoredOrDefaultBaseUrl()
         set(value) {
             val normalized = value.trim().trimEnd('/')
             encryptedPrefs.edit(commit = true) { putString(KEY_BASE_URL, normalized) }
@@ -122,12 +123,21 @@ class SmartAdvisorPrefs internal constructor(
 
     fun clear() {
         encryptedPrefs.edit(commit = true) { clear() }
-        _credentialsFlow.value = SmartAdvisorCredentials()
+        _credentialsFlow.value = readFromPrefs()
+    }
+
+    private fun resolveStoredOrDefaultBaseUrl(): String {
+        val stored = encryptedPrefs.getString(KEY_BASE_URL, null)
+        return when {
+            stored != null -> stored
+            useRuntimeDefaultUrl -> DEFAULT_BASE_URL
+            else -> ""
+        }
     }
 
     private fun readFromPrefs(): SmartAdvisorCredentials {
         return SmartAdvisorCredentials(
-            baseUrl = encryptedPrefs.getString(KEY_BASE_URL, "").orEmpty(),
+            baseUrl = resolveStoredOrDefaultBaseUrl(),
             apiKeyRef = encryptedPrefs.getString(KEY_API_KEY_REF, "").orEmpty(),
             enabled = encryptedPrefs.getBoolean(KEY_ENABLED, false),
             timeoutSeconds = encryptedPrefs.getInt(
@@ -142,6 +152,7 @@ class SmartAdvisorPrefs internal constructor(
     }
 
     companion object {
+        const val DEFAULT_BASE_URL = "https://www.777736225.com/wp-json/smart-advisor/v1/whatsapp/reply"
         private const val PREFS_FILE_NAME = "smart_advisor_encrypted_prefs"
         private const val KEY_BASE_URL = "sa_base_url"
         private const val KEY_API_KEY_REF = "sa_api_key_ref"

@@ -15,8 +15,10 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Rule
 import androidx.compose.material.icons.automirrored.outlined.Rule
 import androidx.compose.material.icons.filled.Home
+import androidx.compose.material.icons.filled.Memory
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.outlined.Home
+import androidx.compose.material.icons.outlined.Memory
 import androidx.compose.material.icons.outlined.Settings
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
@@ -44,6 +46,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.dp
 import androidx.fragment.app.FragmentActivity
@@ -72,6 +75,7 @@ import com.example.ui.navigation.ServerRoute
 import com.example.ui.navigation.SettingsRoute
 import com.example.ui.navigation.StatisticsRoute
 import com.example.ui.navigation.TestReplyRoute
+import com.example.ui.navigation.ToolsAndMemoryRoute
 import com.example.ui.screens.AISettingsScreen
 import com.example.ui.screens.BiometricLockScreen
 import com.example.ui.screens.ContactsFilterScreen
@@ -86,6 +90,7 @@ import com.example.ui.screens.ServerScreen
 import com.example.ui.screens.SettingsScreen
 import com.example.ui.screens.StatisticsScreen
 import com.example.ui.screens.TestReplyScreen
+import com.example.ui.screens.ToolsAndMemoryScreen
 import com.example.ui.theme.AutoMateTheme
 import com.example.ui.viewmodel.MainViewModel
 import dagger.hilt.android.AndroidEntryPoint
@@ -190,6 +195,13 @@ fun AutoMateRootApp(
                 testTag = "nav_rules_item"
             ),
             TopLevelNavItem(
+                route = ToolsAndMemoryRoute,
+                labelRes = R.string.nav_tools_memory,
+                selectedIcon = Icons.Filled.Memory,
+                unselectedIcon = Icons.Outlined.Memory,
+                testTag = "nav_tools_memory_item"
+            ),
+            TopLevelNavItem(
                 route = SettingsRoute,
                 labelRes = R.string.nav_settings,
                 selectedIcon = Icons.Filled.Settings,
@@ -245,7 +257,13 @@ fun AutoMateRootApp(
                                         contentDescription = label
                                     )
                                 },
-                                label = { Text(label) },
+                                label = {
+                                    Text(
+                                        text = label,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                },
                                 modifier = Modifier.testTag(item.testTag)
                             )
                         }
@@ -272,7 +290,13 @@ fun AutoMateRootApp(
                                         contentDescription = label
                                     )
                                 },
-                                label = { Text(label) },
+                                label = {
+                                    Text(
+                                        text = label,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                },
                                 modifier = Modifier.testTag(item.testTag)
                             )
                         }
@@ -290,18 +314,12 @@ fun AutoMateRootApp(
                             onToggleAutoReply = viewModel::toggleAutoReply,
                             onToggleDrivingMode = viewModel::toggleDrivingMode,
                             onRefreshPermissions = viewModel::refreshPermissions,
-                            onSimulateReply = viewModel::simulateReplyForMessage,
                             onClearLogs = viewModel::clearLogs,
                             onNavigateToRules = { navigateTopLevel(RulesRoute) },
+                            onNavigateToToolsAndMemory = { navigateTopLevel(ToolsAndMemoryRoute) },
                             onNavigateToSettings = { navigateTopLevel(SettingsRoute) },
-                            onNavigateToServer = { navController.navigate(ServerRoute) },
-                            onNavigateToSaSettings = { navController.navigate(SaSettingsRoute) },
                             onNavigateToLogs = { navController.navigate(LogsRoute) },
-                            onNavigateToAISettings = { navController.navigate(AISettingsRoute) },
                             onNavigateToStatistics = { navController.navigate(StatisticsRoute) },
-                            onNavigateToMenus = { navController.navigate(MenuReplyRoute) },
-                            onNavigateToFollowUps = { navController.navigate(FollowUpRoute) },
-                            onNavigateToTemplates = { navController.navigate(ReplyTemplatesRoute) },
                             onNavigateToTestReply = { navController.navigate(TestReplyRoute) }
                         )
                     }
@@ -312,11 +330,22 @@ fun AutoMateRootApp(
                             onSaveRule = viewModel::saveRule,
                             onToggleRule = viewModel::toggleRuleEnabled,
                             onDeleteRule = viewModel::deleteRule,
-                            onExportJson = viewModel::exportBackup,
-                            onImportJson = { uri -> viewModel.importBackup(uri, replaceExisting = false) },
                             templates = uiState.templates,
                             onNavigateToTemplates = { navController.navigate(ReplyTemplatesRoute) },
+                            onNavigateToMenus = { navController.navigate(MenuReplyRoute) },
+                            onNavigateToFollowUps = { navController.navigate(FollowUpRoute) },
                             onSaveAsTemplate = viewModel::saveTemplate
+                        )
+                    }
+
+                    composable<ToolsAndMemoryRoute> {
+                        ToolsAndMemoryScreen(
+                            onNavigateToAISettings = { navController.navigate(AISettingsRoute) },
+                            onNavigateToSaSettings = { navController.navigate(SaSettingsRoute) },
+                            onNavigateToServer = { navController.navigate(ServerRoute) },
+                            onNavigateToTestReply = { navController.navigate(TestReplyRoute) },
+                            onNavigateToLogs = { navController.navigate(LogsRoute) },
+                            onNavigateToStatistics = { navController.navigate(StatisticsRoute) }
                         )
                     }
 

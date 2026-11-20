@@ -25,6 +25,7 @@ import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Error
 import androidx.compose.material.icons.filled.Key
+import androidx.compose.material.icons.filled.RestartAlt
 import androidx.compose.material.icons.filled.Save
 import androidx.compose.material.icons.filled.SmartToy
 import androidx.compose.material.icons.filled.Visibility
@@ -37,6 +38,7 @@ import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
@@ -62,10 +64,12 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.example.data.security.SmartAdvisorPrefs
 import com.example.ui.viewmodel.SaSettingsViewModel
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -208,64 +212,88 @@ fun SaSettingsScreen(
                                 style = MaterialTheme.typography.titleMedium
                             )
 
-                            OutlinedTextField(
-                                value = baseUrl,
-                                onValueChange = viewModel::updateBaseUrl,
-                                label = { Text("رابط الموقع (Base URL)") },
-                                placeholder = { Text("https://www.777736225.com") },
-                                singleLine = true,
-                                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri),
+                            CompositionLocalProvider(LocalLayoutDirection provides LayoutDirection.Ltr) {
+                                OutlinedTextField(
+                                    value = baseUrl,
+                                    onValueChange = viewModel::updateBaseUrl,
+                                    label = { Text("رابط نقطة النهاية (Endpoint URL)") },
+                                    placeholder = { Text(SmartAdvisorPrefs.DEFAULT_BASE_URL) },
+                                    singleLine = true,
+                                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri),
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .testTag("sa_base_url_input")
+                                )
+                            }
+
+                            OutlinedButton(
+                                onClick = viewModel::restoreDefaultUrl,
                                 modifier = Modifier
                                     .fillMaxWidth()
-                                    .testTag("sa_base_url_input")
-                            )
+                                    .minimumInteractiveComponentSize()
+                                    .testTag("sa_restore_default_url_btn")
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Filled.RestartAlt,
+                                    contentDescription = null,
+                                    modifier = Modifier.size(18.dp)
+                                )
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text(
+                                    text = "استعادة الرابط الافتراضي (777736225.com)",
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                            }
 
                             val hasKey = apiKeyRef.isNotBlank() && viewModel.hasStoredApiKey()
-                            OutlinedTextField(
-                                value = apiKeyInput,
-                                onValueChange = { newValue ->
-                                    apiKeyInput = newValue
-                                    viewModel.updateApiKey(newValue)
-                                },
-                                label = {
-                                    Text(
-                                        if (hasKey) "مفتاح API (محفوظ مشفراً — اكتب للتحديث)"
-                                        else "مفتاح API (X-SA-API-Key)"
-                                    )
-                                },
-                                placeholder = { Text("أدخل مفتاح Smart Advisor السري") },
-                                singleLine = true,
-                                leadingIcon = {
-                                    Icon(
-                                        imageVector = Icons.Filled.Key,
-                                        contentDescription = "مفتاح API",
-                                        tint = MaterialTheme.colorScheme.primary
-                                    )
-                                },
-                                visualTransformation = if (showApiKey) {
-                                    VisualTransformation.None
-                                } else {
-                                    PasswordVisualTransformation()
-                                },
-                                trailingIcon = {
-                                    IconButton(
-                                        onClick = { showApiKey = !showApiKey },
-                                        modifier = Modifier.testTag("sa_toggle_key_visibility")
-                                    ) {
-                                        Icon(
-                                            imageVector = if (showApiKey) {
-                                                Icons.Filled.VisibilityOff
-                                            } else {
-                                                Icons.Filled.Visibility
-                                            },
-                                            contentDescription = "إظهار أو إخفاء المفتاح"
+                            CompositionLocalProvider(LocalLayoutDirection provides LayoutDirection.Ltr) {
+                                OutlinedTextField(
+                                    value = apiKeyInput,
+                                    onValueChange = { newValue ->
+                                        apiKeyInput = newValue
+                                        viewModel.updateApiKey(newValue)
+                                    },
+                                    label = {
+                                        Text(
+                                            if (hasKey) "مفتاح API (محفوظ مشفراً — اكتب للتحديث)"
+                                            else "مفتاح API (X-SA-API-Key)"
                                         )
-                                    }
-                                },
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .testTag("sa_api_key_input")
-                            )
+                                    },
+                                    placeholder = { Text("أدخل مفتاح Smart Advisor السري") },
+                                    singleLine = true,
+                                    leadingIcon = {
+                                        Icon(
+                                            imageVector = Icons.Filled.Key,
+                                            contentDescription = "مفتاح API",
+                                            tint = MaterialTheme.colorScheme.primary
+                                        )
+                                    },
+                                    visualTransformation = if (showApiKey) {
+                                        VisualTransformation.None
+                                    } else {
+                                        PasswordVisualTransformation()
+                                    },
+                                    trailingIcon = {
+                                        IconButton(
+                                            onClick = { showApiKey = !showApiKey },
+                                            modifier = Modifier.testTag("sa_toggle_key_visibility")
+                                        ) {
+                                            Icon(
+                                                imageVector = if (showApiKey) {
+                                                    Icons.Filled.VisibilityOff
+                                                } else {
+                                                    Icons.Filled.Visibility
+                                                },
+                                                contentDescription = "إظهار أو إخفاء المفتاح"
+                                            )
+                                        }
+                                    },
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .testTag("sa_api_key_input")
+                                )
+                            }
 
                             if (apiKeyRef.isNotBlank()) {
                                 Text(

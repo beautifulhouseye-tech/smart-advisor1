@@ -1,6 +1,5 @@
 package com.example.ui.screens
 
-import android.net.Uri
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
@@ -12,6 +11,7 @@ import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -26,18 +26,19 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Rule
+import androidx.compose.material.icons.automirrored.filled.ScheduleSend
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.BookmarkAdded
 import androidx.compose.material.icons.filled.Bookmarks
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Delete
-import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.Edit
+import androidx.compose.material.icons.filled.FormatListNumbered
 import androidx.compose.material.icons.filled.Image
 import androidx.compose.material.icons.filled.Link
 import androidx.compose.material.icons.filled.LinkOff
 import androidx.compose.material.icons.filled.Search
-import androidx.compose.material.icons.filled.Upload
+import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.Button
@@ -79,17 +80,17 @@ private enum class RuleFilterTab(val label: String) {
     DISABLED("المعطّلة")
 }
 
-@OptIn(ExperimentalLayoutApi::class)
+@OptIn(ExperimentalLayoutApi::class, androidx.compose.material3.ExperimentalMaterial3Api::class)
 @Composable
 fun RulesScreen(
     rules: List<ReplyRuleEntity>,
     onSaveRule: (ReplyRuleEntity) -> Unit,
     onToggleRule: (Long, Boolean) -> Unit,
     onDeleteRule: (Long) -> Unit,
-    onExportJson: (Uri) -> Unit,
-    onImportJson: (Uri) -> Unit,
     templates: List<ReplyTemplateEntity> = emptyList(),
     onNavigateToTemplates: (() -> Unit)? = null,
+    onNavigateToMenus: (() -> Unit)? = null,
+    onNavigateToFollowUps: (() -> Unit)? = null,
     onSaveAsTemplate: ((ReplyTemplateEntity) -> Unit)? = null,
     modifier: Modifier = Modifier
 ) {
@@ -99,14 +100,6 @@ fun RulesScreen(
     var showEditor by remember { mutableStateOf(false) }
 
     val templatesById = remember(templates) { templates.associateBy { it.id } }
-
-    val exportLauncher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.CreateDocument("application/json")
-    ) { uri -> uri?.let(onExportJson) }
-
-    val importLauncher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.OpenDocument()
-    ) { uri -> uri?.let(onImportJson) }
 
     val filteredRules = remember(rules, templatesById, searchQuery, selectedTab) {
         rules.filter { rule ->
@@ -127,6 +120,18 @@ fun RulesScreen(
 
     Scaffold(
         modifier = modifier.fillMaxSize(),
+        contentWindowInsets = WindowInsets(0),
+        topBar = {
+            TopAppBar(
+                title = {
+                    Text(
+                        text = "القواعد والأتمتة",
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
+            )
+        },
         floatingActionButton = {
             FloatingActionButton(
                 onClick = {
@@ -157,65 +162,77 @@ fun RulesScreen(
             ) {
                 item {
                     Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                        Text(
-                            text = "اصنع روبوتك (قواعد الرد)",
-                            style = MaterialTheme.typography.headlineSmall
-                        )
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.spacedBy(10.dp)
-                        ) {
-                            OutlinedButton(
-                                onClick = {
-                                    exportLauncher.launch("automate_ai_backup.json")
-                                },
-                                modifier = Modifier
-                                    .weight(1f)
-                                    .minimumInteractiveComponentSize()
-                                    .testTag("rules_export_json_btn")
+                        if (onNavigateToTemplates != null || onNavigateToMenus != null || onNavigateToFollowUps != null) {
+                            FlowRow(
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                verticalArrangement = Arrangement.spacedBy(6.dp)
                             ) {
-                                Icon(
-                                    imageVector = Icons.Filled.Upload,
-                                    contentDescription = "تصدير JSON",
-                                    modifier = Modifier.size(18.dp)
-                                )
-                                Spacer(modifier = Modifier.width(6.dp))
-                                Text("تصدير JSON")
-                            }
-                            OutlinedButton(
-                                onClick = {
-                                    importLauncher.launch(arrayOf("application/json", "text/plain"))
-                                },
-                                modifier = Modifier
-                                    .weight(1f)
-                                    .minimumInteractiveComponentSize()
-                                    .testTag("rules_import_json_btn")
-                            ) {
-                                Icon(
-                                    imageVector = Icons.Filled.Download,
-                                    contentDescription = "استيراد JSON",
-                                    modifier = Modifier.size(18.dp)
-                                )
-                                Spacer(modifier = Modifier.width(6.dp))
-                                Text("استيراد JSON")
-                            }
-                        }
-
-                        if (onNavigateToTemplates != null) {
-                            FilledTonalButton(
-                                onClick = onNavigateToTemplates,
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .minimumInteractiveComponentSize()
-                                    .testTag("rules_manage_templates_btn")
-                            ) {
-                                Icon(
-                                    imageVector = Icons.Filled.Bookmarks,
-                                    contentDescription = "إدارة قوالب الردود",
-                                    modifier = Modifier.size(18.dp)
-                                )
-                                Spacer(modifier = Modifier.width(8.dp))
-                                Text("إدارة قوالب الردود الجاهزة (${templates.size})")
+                                if (onNavigateToTemplates != null) {
+                                    AssistChip(
+                                        onClick = onNavigateToTemplates,
+                                        leadingIcon = {
+                                            Icon(
+                                                imageVector = Icons.Filled.Bookmarks,
+                                                contentDescription = "القوالب الجاهزة",
+                                                modifier = Modifier.size(18.dp)
+                                            )
+                                        },
+                                        label = {
+                                            Text(
+                                                text = "القوالب الجاهزة (${templates.size})",
+                                                maxLines = 1,
+                                                overflow = TextOverflow.Ellipsis
+                                            )
+                                        },
+                                        modifier = Modifier
+                                            .minimumInteractiveComponentSize()
+                                            .testTag("rules_manage_templates_btn")
+                                    )
+                                }
+                                if (onNavigateToMenus != null) {
+                                    AssistChip(
+                                        onClick = onNavigateToMenus,
+                                        leadingIcon = {
+                                            Icon(
+                                                imageVector = Icons.Filled.FormatListNumbered,
+                                                contentDescription = "القوائم التفاعلية",
+                                                modifier = Modifier.size(18.dp)
+                                            )
+                                        },
+                                        label = {
+                                            Text(
+                                                text = "القوائم التفاعلية",
+                                                maxLines = 1,
+                                                overflow = TextOverflow.Ellipsis
+                                            )
+                                        },
+                                        modifier = Modifier
+                                            .minimumInteractiveComponentSize()
+                                            .testTag("rules_manage_menus_btn")
+                                    )
+                                }
+                                if (onNavigateToFollowUps != null) {
+                                    AssistChip(
+                                        onClick = onNavigateToFollowUps,
+                                        leadingIcon = {
+                                            Icon(
+                                                imageVector = Icons.AutoMirrored.Filled.ScheduleSend,
+                                                contentDescription = "رسائل المتابعة",
+                                                modifier = Modifier.size(18.dp)
+                                            )
+                                        },
+                                        label = {
+                                            Text(
+                                                text = "رسائل المتابعة",
+                                                maxLines = 1,
+                                                overflow = TextOverflow.Ellipsis
+                                            )
+                                        },
+                                        modifier = Modifier
+                                            .minimumInteractiveComponentSize()
+                                            .testTag("rules_manage_followups_btn")
+                                    )
+                                }
                             }
                         }
 
@@ -927,6 +944,7 @@ private fun TemplatePickerDialog(
                                         onClick = { onLinkTemplate(tpl) },
                                         modifier = Modifier
                                             .weight(1f)
+                                            .minimumInteractiveComponentSize()
                                             .testTag("pick_link_template_${tpl.id}")
                                     ) {
                                         Icon(
@@ -935,12 +953,13 @@ private fun TemplatePickerDialog(
                                             modifier = Modifier.size(16.dp)
                                         )
                                         Spacer(modifier = Modifier.width(4.dp))
-                                        Text("ربط حي")
+                                        Text("ربط حي", maxLines = 1, overflow = TextOverflow.Ellipsis)
                                     }
                                     OutlinedButton(
                                         onClick = { onCopyTemplate(tpl) },
                                         modifier = Modifier
                                             .weight(1f)
+                                            .minimumInteractiveComponentSize()
                                             .testTag("pick_copy_template_${tpl.id}")
                                     ) {
                                         Icon(
@@ -949,7 +968,7 @@ private fun TemplatePickerDialog(
                                             modifier = Modifier.size(16.dp)
                                         )
                                         Spacer(modifier = Modifier.width(4.dp))
-                                        Text("إدراج نسخة")
+                                        Text("إدراج نسخة", maxLines = 1, overflow = TextOverflow.Ellipsis)
                                     }
                                 }
                             }

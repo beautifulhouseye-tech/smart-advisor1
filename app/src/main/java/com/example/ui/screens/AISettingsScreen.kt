@@ -21,7 +21,7 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.CloudDone
-import androidx.compose.material.icons.filled.Memory
+import androidx.compose.material.icons.filled.Description
 import androidx.compose.material.icons.filled.Psychology
 import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material.icons.filled.Visibility
@@ -51,6 +51,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.minimumInteractiveComponentSize
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -58,10 +59,13 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -72,7 +76,6 @@ import com.example.data.preferences.ResponseTone
 import com.example.network.ai.AIReplyEngine
 import com.example.ui.viewmodel.AISettingsViewModel
 import java.util.Locale
-import kotlin.math.roundToInt
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
@@ -222,66 +225,70 @@ fun AISettingsScreen(
                                 }
                             }
 
-                            OutlinedTextField(
-                                value = state.primaryBaseUrl,
-                                onValueChange = viewModel::updatePrimaryBaseUrl,
-                                label = { Text("رابط بوابة New API (HTTPS)") },
-                                placeholder = { Text("https://api.yourdomain.com") },
-                                singleLine = true,
-                                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri),
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .testTag("ai_primary_base_url_input")
-                            )
+                            CompositionLocalProvider(LocalLayoutDirection provides LayoutDirection.Ltr) {
+                                Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                                    OutlinedTextField(
+                                        value = state.primaryBaseUrl,
+                                        onValueChange = viewModel::updatePrimaryBaseUrl,
+                                        label = { Text("رابط بوابة New API (HTTPS)") },
+                                        placeholder = { Text("https://api.yourdomain.com") },
+                                        singleLine = true,
+                                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri),
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .testTag("ai_primary_base_url_input")
+                                    )
 
-                            OutlinedTextField(
-                                value = state.newApiKey.ifBlank { state.apiKey },
-                                onValueChange = { value ->
-                                    if (state.provider == AIReplyEngine.Provider.NEW_API || state.primaryBaseUrl.isNotBlank()) {
-                                        viewModel.updateNewApiKey(value)
-                                    }
-                                    viewModel.updateApiKey(value)
-                                },
-                                label = { Text("مفتاح API الرئيسي (SecretVault)") },
-                                singleLine = true,
-                                visualTransformation = if (apiKeyVisible || newApiKeyVisible) {
-                                    VisualTransformation.None
-                                } else {
-                                    PasswordVisualTransformation()
-                                },
-                                trailingIcon = {
-                                    IconButton(onClick = {
-                                        apiKeyVisible = !apiKeyVisible
-                                        newApiKeyVisible = apiKeyVisible
-                                    }) {
-                                        Icon(
-                                            imageVector = if (apiKeyVisible) {
-                                                Icons.Filled.VisibilityOff
-                                            } else {
-                                                Icons.Filled.Visibility
-                                            },
-                                            contentDescription = if (apiKeyVisible) "إخفاء المفتاح" else "إظهار المفتاح"
-                                        )
-                                    }
-                                },
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .testTag("ai_api_key_input")
-                            )
+                                    OutlinedTextField(
+                                        value = state.newApiKey.ifBlank { state.apiKey },
+                                        onValueChange = { value ->
+                                            if (state.provider == AIReplyEngine.Provider.NEW_API || state.primaryBaseUrl.isNotBlank()) {
+                                                viewModel.updateNewApiKey(value)
+                                            }
+                                            viewModel.updateApiKey(value)
+                                        },
+                                        label = { Text("مفتاح API الرئيسي (SecretVault)") },
+                                        singleLine = true,
+                                        visualTransformation = if (apiKeyVisible || newApiKeyVisible) {
+                                            VisualTransformation.None
+                                        } else {
+                                            PasswordVisualTransformation()
+                                        },
+                                        trailingIcon = {
+                                            IconButton(onClick = {
+                                                apiKeyVisible = !apiKeyVisible
+                                                newApiKeyVisible = apiKeyVisible
+                                            }) {
+                                                Icon(
+                                                    imageVector = if (apiKeyVisible) {
+                                                        Icons.Filled.VisibilityOff
+                                                    } else {
+                                                        Icons.Filled.Visibility
+                                                    },
+                                                    contentDescription = if (apiKeyVisible) "إخفاء المفتاح" else "إظهار المفتاح"
+                                                )
+                                            }
+                                        },
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .testTag("ai_api_key_input")
+                                    )
 
-                            OutlinedTextField(
-                                value = state.primaryModel.ifBlank { state.model },
-                                onValueChange = { modelName ->
-                                    viewModel.updatePrimaryModel(modelName)
-                                    viewModel.selectModel(modelName)
-                                },
-                                label = { Text("اسم النموذج الرئيسي (قابل للتعديل)") },
-                                placeholder = { Text("gpt-4o-mini") },
-                                singleLine = true,
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .testTag("ai_primary_model_input")
-                            )
+                                    OutlinedTextField(
+                                        value = state.primaryModel.ifBlank { state.model },
+                                        onValueChange = { modelName ->
+                                            viewModel.updatePrimaryModel(modelName)
+                                            viewModel.selectModel(modelName)
+                                        },
+                                        label = { Text("اسم النموذج الرئيسي (قابل للتعديل)") },
+                                        placeholder = { Text("gpt-4o-mini") },
+                                        singleLine = true,
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .testTag("ai_primary_model_input")
+                                    )
+                                }
+                            }
 
                             Column {
                                 Text(
@@ -299,16 +306,18 @@ fun AISettingsScreen(
                                 )
                             }
 
-                            OutlinedTextField(
-                                value = state.maxTokens.toString(),
-                                onValueChange = viewModel::updateMaxTokens,
-                                label = { Text("الحد الأقصى للرموز MaxTokens (50 - 1200)") },
-                                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                                singleLine = true,
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .testTag("ai_max_tokens_input")
-                            )
+                            CompositionLocalProvider(LocalLayoutDirection provides LayoutDirection.Ltr) {
+                                OutlinedTextField(
+                                    value = state.maxTokens.toString(),
+                                    onValueChange = viewModel::updateMaxTokens,
+                                    label = { Text("MaxTokens (50 - 1200)") },
+                                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                                    singleLine = true,
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .testTag("ai_max_tokens_input")
+                                )
+                            }
 
                             Row(
                                 modifier = Modifier.fillMaxWidth(),
@@ -341,7 +350,7 @@ fun AISettingsScreen(
                                             modifier = Modifier.padding(end = 6.dp)
                                         )
                                     }
-                                    Text("اختبار New API")
+                                    Text("اختبار New API", maxLines = 1, overflow = TextOverflow.Ellipsis)
                                 }
                             }
 
@@ -394,57 +403,61 @@ fun AISettingsScreen(
                                 testTag = "ai_fallback_gateway_switch"
                             )
 
-                            if (!state.fallbackUseNewApiGateway) {
-                                OutlinedTextField(
-                                    value = state.ollamaBaseUrl,
-                                    onValueChange = viewModel::updateOllamaBaseUrl,
-                                    label = { Text("رابط Ollama الخارجي الآمن (HTTPS)") },
-                                    placeholder = { Text("https://ollama.yourdomain.com") },
-                                    singleLine = true,
-                                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri),
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .testTag("ai_ollama_url_input")
-                                )
+                            CompositionLocalProvider(LocalLayoutDirection provides LayoutDirection.Ltr) {
+                                Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                                    if (!state.fallbackUseNewApiGateway) {
+                                        OutlinedTextField(
+                                            value = state.ollamaBaseUrl,
+                                            onValueChange = viewModel::updateOllamaBaseUrl,
+                                            label = { Text("رابط Ollama الخارجي الآمن (HTTPS)") },
+                                            placeholder = { Text("https://ollama.yourdomain.com") },
+                                            singleLine = true,
+                                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri),
+                                            modifier = Modifier
+                                                .fillMaxWidth()
+                                                .testTag("ai_ollama_url_input")
+                                        )
 
-                                OutlinedTextField(
-                                    value = state.ollamaApiKey,
-                                    onValueChange = viewModel::updateOllamaApiKey,
-                                    label = { Text("مفتاح حماية Ollama/النفق (اختياري)") },
-                                    singleLine = true,
-                                    visualTransformation = if (ollamaKeyVisible) {
-                                        VisualTransformation.None
-                                    } else {
-                                        PasswordVisualTransformation()
-                                    },
-                                    trailingIcon = {
-                                        IconButton(onClick = { ollamaKeyVisible = !ollamaKeyVisible }) {
-                                            Icon(
-                                                imageVector = if (ollamaKeyVisible) {
-                                                    Icons.Filled.VisibilityOff
-                                                } else {
-                                                    Icons.Filled.Visibility
-                                                },
-                                                contentDescription = "إظهار/إخفاء مفتاح Ollama"
-                                            )
-                                        }
-                                    },
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .testTag("ai_ollama_key_input")
-                                )
+                                        OutlinedTextField(
+                                            value = state.ollamaApiKey,
+                                            onValueChange = viewModel::updateOllamaApiKey,
+                                            label = { Text("مفتاح حماية Ollama/النفق (اختياري)") },
+                                            singleLine = true,
+                                            visualTransformation = if (ollamaKeyVisible) {
+                                                VisualTransformation.None
+                                            } else {
+                                                PasswordVisualTransformation()
+                                            },
+                                            trailingIcon = {
+                                                IconButton(onClick = { ollamaKeyVisible = !ollamaKeyVisible }) {
+                                                    Icon(
+                                                        imageVector = if (ollamaKeyVisible) {
+                                                            Icons.Filled.VisibilityOff
+                                                        } else {
+                                                            Icons.Filled.Visibility
+                                                        },
+                                                        contentDescription = "إظهار/إخفاء مفتاح Ollama"
+                                                    )
+                                                }
+                                            },
+                                            modifier = Modifier
+                                                .fillMaxWidth()
+                                                .testTag("ai_ollama_key_input")
+                                        )
+                                    }
+
+                                    OutlinedTextField(
+                                        value = state.ollamaModel,
+                                        onValueChange = viewModel::updateOllamaModel,
+                                        label = { Text("اسم النموذج الاحتياطي") },
+                                        placeholder = { Text(AiSettingsState.DEFAULT_QWEN_MODEL) },
+                                        singleLine = true,
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .testTag("ai_ollama_model_input")
+                                    )
+                                }
                             }
-
-                            OutlinedTextField(
-                                value = state.ollamaModel,
-                                onValueChange = viewModel::updateOllamaModel,
-                                label = { Text("اسم النموذج الاحتياطي") },
-                                placeholder = { Text(AiSettingsState.DEFAULT_QWEN_MODEL) },
-                                singleLine = true,
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .testTag("ai_ollama_model_input")
-                            )
 
                             Row(
                                 modifier = Modifier.fillMaxWidth(),
@@ -471,7 +484,7 @@ fun AISettingsScreen(
                                         )
                                         Spacer(modifier = Modifier.width(6.dp))
                                     }
-                                    Text("اختبار Qwen")
+                                    Text("اختبار Qwen", maxLines = 1, overflow = TextOverflow.Ellipsis)
                                 }
                             }
 
@@ -571,16 +584,18 @@ fun AISettingsScreen(
                                 }
                             }
 
-                            OutlinedTextField(
-                                value = if (state.maxReplyLengthChars > 0) state.maxReplyLengthChars.toString() else "",
-                                onValueChange = viewModel::updateMaxReplyLengthChars,
-                                label = { Text("الحد الأقصى لطول الرد بالحروف (40 - 2000)") },
-                                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                                singleLine = true,
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .testTag("ai_max_reply_chars_input")
-                            )
+                            CompositionLocalProvider(LocalLayoutDirection provides LayoutDirection.Ltr) {
+                                OutlinedTextField(
+                                    value = if (state.maxReplyLengthChars > 0) state.maxReplyLengthChars.toString() else "",
+                                    onValueChange = viewModel::updateMaxReplyLengthChars,
+                                    label = { Text("الحد الأقصى لطول الرد بالحروف (40 - 2000)") },
+                                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                                    singleLine = true,
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .testTag("ai_max_reply_chars_input")
+                                )
+                            }
 
                             Text(
                                 text = "لغة الرد",
@@ -618,7 +633,7 @@ fun AISettingsScreen(
                     }
                 }
 
-                // 5. Smart Advisor Collaboration, Local Context Memory & Consent
+                // 5. System Prompt, Safe Fallback & Save (Memory & Tools moved to ToolsAndMemoryScreen)
                 item {
                     Card(
                         modifier = Modifier.fillMaxWidth(),
@@ -633,78 +648,20 @@ fun AISettingsScreen(
                                 horizontalArrangement = Arrangement.spacedBy(8.dp)
                             ) {
                                 Icon(
-                                    imageVector = Icons.Filled.Memory,
+                                    imageVector = Icons.Filled.Description,
                                     contentDescription = null,
                                     tint = MaterialTheme.colorScheme.primary
                                 )
                                 Text(
-                                    text = "الذاكرة وأدوات المنسّق (Smart Advisor + Webhook)",
+                                    text = "التوجيه الأساسي والرد البديل الآمن",
                                     style = MaterialTheme.typography.titleMedium
                                 )
                             }
 
-                            SettingSwitchRow(
-                                title = "تفعيل سياق المحادثة المتتابع",
-                                subtitle = "يحتفظ بسياق الحوار وآخر منتج نوقش للرد الدقيق على الأسئلة اللاحقة.",
-                                checked = state.useConversationContext,
-                                onCheckedChange = viewModel::setUseConversationContext,
-                                testTag = "ai_context_enabled_switch"
-                            )
-
-                            if (state.useConversationContext) {
-                                Column {
-                                    Text(
-                                        text = "نافذة سياق المحادثة المحلية: ${state.contextWindowPairs} أزواج رسائل (${state.contextWindowPairs * 2} رسالة)",
-                                        style = MaterialTheme.typography.labelLarge
-                                    )
-                                    Slider(
-                                        value = state.contextWindowPairs.toFloat(),
-                                        onValueChange = { viewModel.updateContextWindowPairs(it.roundToInt()) },
-                                        valueRange = 6f..8f,
-                                        steps = 1,
-                                        modifier = Modifier.testTag("ai_context_window_slider")
-                                    )
-                                }
-                            }
-
-                            SettingSwitchRow(
-                                title = "تفعيل قواعد الكلمات المفتاحية ضمن المسار الموحد",
-                                subtitle = "تُفحص القواعد المخصصة قبل استدعاء الذكاء الاصطناعي، والقواعد غير الحاسمة تُمرر كسياق له.",
-                                checked = state.useKeywordRules,
-                                onCheckedChange = viewModel::setUseKeywordRules,
-                                testTag = "ai_keyword_rules_switch"
-                            )
-
-                            SettingSwitchRow(
-                                title = "تفعيل استشارة Smart Advisor لبيانات المتجر",
-                                subtitle = "يُستعلم فقط عند الحاجة لأسعار المنتجات أو العروض أو سياسات الشحن والاسترجاع.",
-                                checked = state.saCollaborationEnabled,
-                                onCheckedChange = viewModel::setSaCollaborationEnabled,
-                                testTag = "ai_sa_collab_switch"
-                            )
-
-                            SettingSwitchRow(
-                                title = "السماح باستدعاء Webhook كأداة للمنسّق",
-                                subtitle = "يسمح للذكاء الاصطناعي بالاستعلام من الأنظمة الخارجية (ERP/CRM) عبر Webhook في وضع AI_TOOL.",
-                                checked = state.webhookToolEnabled,
-                                onCheckedChange = viewModel::setWebhookToolEnabled,
-                                testTag = "ai_webhook_tool_switch"
-                            )
-
-                            SettingSwitchRow(
-                                title = "مزامنة ذاكرة العميل الدائمة مع المتجر",
-                                subtitle = "يحفظ فقط الملخص الدائم والتفضيلات المؤكدة — ولا يرسل سجل الدردشة الخام أبداً.",
-                                checked = state.syncCustomerMemory,
-                                onCheckedChange = viewModel::setSyncCustomerMemory,
-                                testTag = "ai_sync_memory_switch"
-                            )
-
-                            SettingSwitchRow(
-                                title = "اشتراط موافقة العميل قبل الحفظ الدائم",
-                                subtitle = "يمنع إرسال أي تحديث لذاكرة العميل الدائمة دون موافقة صريحة.",
-                                checked = state.requireCustomerConsent,
-                                onCheckedChange = viewModel::setRequireCustomerConsent,
-                                testTag = "ai_require_consent_switch"
+                            Text(
+                                text = "تُدار إعدادات ذاكرة المحادثة وأدوات Smart Advisor وWebhook من تبويب «الأدوات والذاكرة».",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
 
                             OutlinedTextField(
@@ -752,7 +709,11 @@ fun AISettingsScreen(
                                     .minimumInteractiveComponentSize()
                                     .testTag("ai_save_button")
                             ) {
-                                Text("حفظ جميع الإعدادات")
+                                Text(
+                                    text = "حفظ إعدادات المحرك والأسلوب",
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
                             }
                         }
                     }

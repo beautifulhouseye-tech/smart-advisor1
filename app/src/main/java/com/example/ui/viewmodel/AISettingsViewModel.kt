@@ -257,6 +257,21 @@ class AISettingsViewModel @Inject constructor(
     }
 
     fun saveSettings() {
+        persistSettings(showStatus = true, statusText = "تم حفظ إعدادات الذكاء الاصطناعي")
+    }
+
+    fun saveMemoryAndTools() {
+        persistSettings(showStatus = true, statusText = "تم حفظ إعدادات الذاكرة والأدوات")
+    }
+
+    fun persistMemoryAndToolsSilently() {
+        persistSettings(showStatus = false)
+    }
+
+    private fun persistSettings(
+        showStatus: Boolean,
+        statusText: String = "تم حفظ إعدادات الذكاء الاصطناعي والتعاون الذكي"
+    ) {
         val state = _uiState.value
         val keyRef = AiSettingsPrefs.apiKeyRefFor(state.provider)
         if (state.apiKey.isNotBlank()) {
@@ -284,7 +299,7 @@ class AISettingsViewModel @Inject constructor(
         _uiState.update {
             it.copy(
                 maxReplyLengthChars = settingsState.maxReplyLengthChars,
-                statusMessage = "تم حفظ إعدادات الذكاء الاصطناعي والتعاون الذكي"
+                statusMessage = if (showStatus) statusText else it.statusMessage
             )
         }
     }
