@@ -2,6 +2,7 @@ package com.example.engine
 
 import com.example.data.local.dao.ConversationContextDao
 import com.example.data.local.entity.ConversationContextEntity
+import com.example.data.preferences.UnunderstoodFallbackMode
 import com.example.network.ai.AIReplyEngine
 import com.example.network.security.SecretVault
 import com.example.network.security.SensitiveDataRedactor
@@ -39,10 +40,17 @@ class ConversationMemoryManager(
         val isSandbox: Boolean = false
     )
 
+    data class ClarificationTracker(
+        val consecutiveCount: Int = 0,
+        val lastMode: UnunderstoodFallbackMode? = null,
+        val lastTimestampMs: Long = 0L
+    )
+
     private val json = Json { ignoreUnknownKeys = true }
     private val sandboxContexts = ConcurrentHashMap<String, ConversationContextEntity>()
     private val pendingHandoffTurns = ConcurrentHashMap<String, StagedAssistantTurn>()
     private val shownProductIdsByConversation = ConcurrentHashMap<String, MutableList<Long>>()
+    private val clarificationTrackers = ConcurrentHashMap<String, ClarificationTracker>()
 
     suspend fun getOrCreateContext(
         conversationKey: String,
@@ -354,7 +362,58 @@ class ConversationMemoryManager(
     fun clearSandboxConversation(conversationKey: String) {
         sandboxContexts.remove(conversationKey)
         shownProductIdsByConversation.remove(conversationKey)
+        clarificationTrackers.remove(conversationKey)
         pendingHandoffTurns.entries.removeIf { it.value.isSandbox && it.value.conversationKey == conversationKey }
+    }
+
+    fun hasActiveContextualHistory(
+        context: ConversationContextEntity,
+        excludeLastUserMessage: Boolean = true
+    ): Boolean {
+        val turns = decodeTurns(context.turnsJson)
+        val priorTurns = if (excludeLastUserMessage && turns.lastOrNull()?.role == "user") {
+            turns.dropLast(1)
+        } else {
+            turns
+        }
+        val hasAssistantTurn = priorTurns.any { it.role == "assistant" && it.text.isNotBlank() }
+        val hasShownProducts = getShownProductIds(context.conversationKey).isNotEmpty()
+        return hasAssistantTurn ||
+            hasShownProducts ||
+            context.currentTopic.isNotBlank() ||
+            context.lastProductDiscussed.isNotBlank()
+    }
+
+    fun shouldSuppressClarificationLoop(
+        conversationKey: String,
+        requestedMode: UnunderstoodFallbackMode
+    ): Boolean {
+        if (conversationKey.isBlank() || requestedMode == UnunderstoodFallbackMode.NO_REPLY) {
+            return false
+        }
+        val tracker = clarificationTrackers[conversationKey] ?: return false
+        return tracker.consecutiveCount >= 1 && tracker.lastMode == requestedMode
+    }
+
+    fun recordUnunderstoodFallbackSent(
+        conversationKey: String,
+        mode: UnunderstoodFallbackMode
+    ) {
+        if (conversationKey.isBlank()) return
+        clarificationTrackers.compute(conversationKey) { _, existing ->
+            val nextCount = if (existing?.lastMode == mode) existing.consecutiveCount + 1 else 1
+            ClarificationTracker(
+                consecutiveCount = nextCount,
+                lastMode = mode,
+                lastTimestampMs = clockMs()
+            )
+        }
+    }
+
+    fun resetClarificationState(conversationKey: String) {
+        if (conversationKey.isNotBlank()) {
+            clarificationTrackers.remove(conversationKey)
+        }
     }
 
     suspend fun getContext(conversationKey: String, isSandbox: Boolean = false): ConversationContextEntity? {

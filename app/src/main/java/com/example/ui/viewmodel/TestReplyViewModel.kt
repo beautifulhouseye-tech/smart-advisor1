@@ -6,6 +6,7 @@ import com.example.data.preferences.AiSettingsPrefs
 import com.example.data.repository.AutoMateRepository
 import com.example.data.repository.ServerConfigRepository
 import com.example.data.security.SmartAdvisorPrefs
+import com.example.engine.MessageProcessingClassification
 import com.example.engine.ProductMessage
 import com.example.engine.ReplySourceCategory
 import com.example.engine.ResponseType
@@ -53,7 +54,9 @@ data class TestChatMessage(
     val stageLatenciesMs: Map<String, Long> = emptyMap(),
     val redactedError: String? = null,
     val responseType: ResponseType = ResponseType.TEXT_MESSAGE,
-    val productMessage: ProductMessage? = null
+    val productMessage: ProductMessage? = null,
+    val suppressedByUnknownIntent: Boolean = false,
+    val processingClassification: MessageProcessingClassification? = null
 )
 
 data class TestReplyUiState(
@@ -216,7 +219,9 @@ class TestReplyViewModel internal constructor(
                 stageLatenciesMs = result.stageLatenciesMs,
                 redactedError = result.redactedError,
                 responseType = result.responseType,
-                productMessage = result.productMessage
+                productMessage = result.productMessage,
+                suppressedByUnknownIntent = result.suppressedByUnknownIntent,
+                processingClassification = result.processingClassification
             )
 
             _uiState.update { current ->

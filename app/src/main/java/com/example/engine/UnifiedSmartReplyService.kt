@@ -34,7 +34,8 @@ class UnifiedSmartReplyService internal constructor(
     private val smartAdvisorPrefs: SmartAdvisorPrefs?,
     private val conversationMemoryManager: ConversationMemoryManager? = null,
     private val smartCollaborationCoordinator: SmartCollaborationCoordinator? = null,
-    private val clockMs: () -> Long = { System.currentTimeMillis() }
+    private val clockMs: () -> Long = { System.currentTimeMillis() },
+    private val diagnosticLogger: SafeDiagnosticLogger = SafeDiagnosticLogger(secretVault, clockMs)
 ) {
     @Inject
     constructor(
@@ -48,7 +49,8 @@ class UnifiedSmartReplyService internal constructor(
         smartAdvisorClient: SmartAdvisorClient,
         smartAdvisorPrefs: SmartAdvisorPrefs,
         conversationMemoryManager: ConversationMemoryManager,
-        smartCollaborationCoordinator: SmartCollaborationCoordinator
+        smartCollaborationCoordinator: SmartCollaborationCoordinator,
+        diagnosticLogger: SafeDiagnosticLogger
     ) : this(
         repository = repository,
         menuReplyManager = menuReplyManager,
@@ -61,7 +63,8 @@ class UnifiedSmartReplyService internal constructor(
         smartAdvisorPrefs = smartAdvisorPrefs,
         conversationMemoryManager = conversationMemoryManager,
         smartCollaborationCoordinator = smartCollaborationCoordinator,
-        clockMs = { System.currentTimeMillis() }
+        clockMs = { System.currentTimeMillis() },
+        diagnosticLogger = diagnosticLogger
     )
 
     data class Request(
@@ -120,7 +123,9 @@ class UnifiedSmartReplyService internal constructor(
         val productMessage: ProductMessage? = null,
         val products: List<ProductMessage> = emptyList(),
         val fallbackTextReply: String = "",
-        val storeName: String = ""
+        val storeName: String = "",
+        val suppressedByUnknownIntent: Boolean = false,
+        val processingClassification: MessageProcessingClassification? = null
     )
 
     suspend fun resolve(request: Request): Decision {
@@ -332,6 +337,35 @@ class UnifiedSmartReplyService internal constructor(
                     evaluated += "أداة Webhook"
                 }
 
+                if (collab.suppressedByUnknownIntent) {
+                    evaluated += "كتم الرد (رسالة غير مفهومة)"
+                    val sandboxNotice = if (request.isSandbox) {
+                        "تم كتم الرد تلقائياً لأن الرسالة غير مفهومة ومفتاح عدم الرد مفعّل."
+                    } else {
+                        ""
+                    }
+                    return Decision(
+                        matched = false,
+                        replyText = "",
+                        displayReplyText = sandboxNotice,
+                        sourceLabel = "كتم الرد (عدم فهم)",
+                        sourceCategory = ReplySourceCategory.NO_MATCH,
+                        evaluatedPath = evaluated,
+                        latencyMs = elapsed(startMs),
+                        conversationKey = collab.conversationKey,
+                        usedSmartCollaboration = true,
+                        usedNewApi = collab.usedNewApi,
+                        activeEngineLabel = collab.activeEngine,
+                        switchedToQwen = collab.switchedToQwen,
+                        detectedIntent = collab.saIntent,
+                        memoryLoaded = collab.memoryLoaded,
+                        stageLatenciesMs = collab.stageLatenciesMs,
+                        redactedError = collab.redactedError,
+                        suppressedByUnknownIntent = true,
+                        processingClassification = collab.processingClassification
+                    )
+                }
+
                 if (!collab.replyText.isNullOrBlank()) {
                     if (request.isSandbox) {
                         conversationMemoryManager?.commitAssistantTurnImmediately(
@@ -403,7 +437,8 @@ class UnifiedSmartReplyService internal constructor(
                         productMessage = collab.productMessage,
                         products = collab.products,
                         fallbackTextReply = collab.fallbackTextReply.ifBlank { finalReplyText },
-                        storeName = collab.storeName
+                        storeName = collab.storeName,
+                        processingClassification = collab.processingClassification
                     )
                 }
             } else {
@@ -492,10 +527,19 @@ class UnifiedSmartReplyService internal constructor(
             }
         }
 
-        // 8. Explicit Safe Fallback Reply when AI failed
+        // 8. Explicit Safe Fallback Reply when AI failed (technical failure only)
         if (aiSettings.enabled && aiSettings.safeFallbackReply.isNotBlank()) {
             evaluated += "الرد الآمن البديل"
             val safeReply = SensitiveDataRedactor.scrub(aiSettings.safeFallbackReply.trim(), secretVault)
+            diagnosticLogger.log(
+                tag = DiagnosticEventTag.FALLBACK_USED,
+                conversationId = resolvedConvKey,
+                messageId = request.msgKey,
+                detectedStatus = (lastAiOutcome?.processingClassification?.status
+                    ?: MessageProcessingStatus.SERVICE_ERROR).name,
+                decision = "SAFE_TECHNICAL_FALLBACK_REPLY",
+                errorSource = lastAiOutcome?.activeEngine ?: aiSettings.provider.name
+            )
             return Decision(
                 matched = true,
                 replyText = safeReply,
@@ -508,7 +552,8 @@ class UnifiedSmartReplyService internal constructor(
                 usedSmartCollaboration = usedSmartCollab,
                 usedNewApi = lastAiOutcome?.usedNewApi == true,
                 switchedToQwen = lastAiOutcome?.switchedToQwen == true,
-                redactedError = lastAiOutcome?.redactedError ?: directAiError
+                redactedError = lastAiOutcome?.redactedError ?: directAiError,
+                processingClassification = lastAiOutcome?.processingClassification?.copy(finalReply = safeReply)
             )
         }
 
@@ -560,6 +605,17 @@ class UnifiedSmartReplyService internal constructor(
         } else {
             ""
         }
+        val finalClassification = lastAiOutcome?.processingClassification ?: err?.let {
+            MessageProcessingClassification(
+                status = if (lastAiOutcome?.engineFailureCategory == EngineFailureCategory.TIMEOUT) {
+                    MessageProcessingStatus.TIMEOUT
+                } else {
+                    MessageProcessingStatus.SERVICE_ERROR
+                },
+                failureReason = it,
+                source = lastAiOutcome?.activeEngine ?: aiSettings.provider.name
+            )
+        }
         return Decision(
             matched = false,
             replyText = noMatchText,
@@ -581,7 +637,8 @@ class UnifiedSmartReplyService internal constructor(
             invokedTools = lastAiOutcome?.invokedTools.orEmpty(),
             toolRoundsUsed = lastAiOutcome?.toolRoundsUsed ?: 0,
             stageLatenciesMs = lastAiOutcome?.stageLatenciesMs.orEmpty(),
-            redactedError = err
+            redactedError = err,
+            processingClassification = finalClassification
         )
     }
 
@@ -780,7 +837,12 @@ class UnifiedSmartReplyService internal constructor(
                         sourceCategory = ReplySourceCategory.NO_MATCH,
                         evaluatedPath = evaluated,
                         latencyMs = elapsedMs,
-                        conversationKey = conversationKey
+                        conversationKey = conversationKey,
+                        processingClassification = MessageProcessingClassification(
+                            status = MessageProcessingStatus.INVALID_RESPONSE,
+                            source = successLabel,
+                            failureReason = "empty_external_response"
+                        )
                     )
                 }
             }
@@ -794,12 +856,21 @@ class UnifiedSmartReplyService internal constructor(
                     sourceCategory = ReplySourceCategory.ERROR,
                     evaluatedPath = evaluated,
                     latencyMs = elapsedMs,
-                    conversationKey = conversationKey
+                    conversationKey = conversationKey,
+                    processingClassification = MessageProcessingClassification(
+                        status = MessageProcessingStatus.SERVICE_ERROR,
+                        source = successLabel,
+                        failureReason = "http_409_conflict"
+                    )
                 )
             }
             is HttpTransport.Result.Failure -> {
                 val safeErr = SensitiveDataRedactor.scrub(result.error, secretVault)
                 val msg = "تعذر الرد من الخادم: $safeErr"
+                val isTimeout = result.code == 408 || result.code == 504 ||
+                    safeErr.contains("timeout", ignoreCase = true) ||
+                    safeErr.contains("timed out", ignoreCase = true) ||
+                    safeErr.contains("مهلة", ignoreCase = true)
                 Decision(
                     matched = false,
                     replyText = msg,
@@ -809,7 +880,12 @@ class UnifiedSmartReplyService internal constructor(
                     evaluatedPath = evaluated,
                     latencyMs = elapsedMs,
                     conversationKey = conversationKey,
-                    redactedError = safeErr
+                    redactedError = safeErr,
+                    processingClassification = MessageProcessingClassification(
+                        status = if (isTimeout) MessageProcessingStatus.TIMEOUT else MessageProcessingStatus.SERVICE_ERROR,
+                        source = successLabel,
+                        failureReason = safeErr
+                    )
                 )
             }
         }

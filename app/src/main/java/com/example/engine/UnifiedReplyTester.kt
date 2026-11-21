@@ -54,7 +54,9 @@ data class UnifiedTestResult(
     val stageLatenciesMs: Map<String, Long> = emptyMap(),
     val redactedError: String? = null,
     val responseType: ResponseType = ResponseType.TEXT_MESSAGE,
-    val productMessage: ProductMessage? = null
+    val productMessage: ProductMessage? = null,
+    val suppressedByUnknownIntent: Boolean = false,
+    val processingClassification: MessageProcessingClassification? = null
 )
 
 @Singleton
@@ -233,7 +235,9 @@ class UnifiedReplyTester internal constructor(
             stageLatenciesMs = decision.stageLatenciesMs,
             redactedError = decision.redactedError,
             responseType = decision.responseType,
-            productMessage = decision.productMessage
+            productMessage = decision.productMessage,
+            suppressedByUnknownIntent = decision.suppressedByUnknownIntent,
+            processingClassification = decision.processingClassification
         )
     }
 

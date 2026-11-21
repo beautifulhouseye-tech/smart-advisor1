@@ -1,6 +1,7 @@
 package com.example.ui.screens
 
 import androidx.activity.compose.BackHandler
+import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -17,12 +18,14 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.CloudDone
 import androidx.compose.material.icons.filled.Description
 import androidx.compose.material.icons.filled.Psychology
+import androidx.compose.material.icons.filled.Shield
 import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material.icons.filled.VisibilityOff
@@ -35,12 +38,14 @@ import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.ExposedDropdownMenuBox
 import androidx.compose.material3.ExposedDropdownMenuDefaults
 import androidx.compose.material3.FilterChip
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.MenuAnchorType
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Slider
 import androidx.compose.material3.SnackbarHost
@@ -61,6 +66,8 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
@@ -69,10 +76,12 @@ import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.example.R
 import com.example.data.preferences.AiSettingsState
 import com.example.data.preferences.ReplyLanguage
 import com.example.data.preferences.ResponseLength
 import com.example.data.preferences.ResponseTone
+import com.example.data.preferences.UnunderstoodFallbackMode
 import com.example.network.ai.AIReplyEngine
 import com.example.ui.viewmodel.AISettingsViewModel
 import java.util.Locale
@@ -129,7 +138,8 @@ fun AISettingsScreen(
             LazyColumn(
                 modifier = Modifier
                     .fillMaxSize()
-                    .widthIn(max = 680.dp),
+                    .widthIn(max = 680.dp)
+                    .testTag("ai_settings_list"),
                 contentPadding = PaddingValues(16.dp),
                 verticalArrangement = Arrangement.spacedBy(14.dp)
             ) {
@@ -633,7 +643,130 @@ fun AISettingsScreen(
                     }
                 }
 
-                // 5. System Prompt, Safe Fallback & Save (Memory & Tools moved to ToolsAndMemoryScreen)
+                // 5. Ununderstood Messages Handling
+                item {
+                    Card(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("ai_ununderstood_section_card"),
+                        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
+                    ) {
+                        Column(
+                            modifier = Modifier.padding(16.dp),
+                            verticalArrangement = Arrangement.spacedBy(12.dp)
+                        ) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Filled.Shield,
+                                    contentDescription = null,
+                                    tint = MaterialTheme.colorScheme.primary
+                                )
+                                Text(
+                                    text = stringResource(R.string.ai_ununderstood_section_title),
+                                    style = MaterialTheme.typography.titleMedium
+                                )
+                            }
+
+                            SettingSwitchRow(
+                                title = stringResource(R.string.ai_ununderstood_suppress_title),
+                                subtitle = stringResource(R.string.ai_ununderstood_suppress_subtitle),
+                                checked = state.suppressReplyWhenUnunderstood,
+                                onCheckedChange = viewModel::setSuppressReplyWhenUnunderstood,
+                                testTag = "ai_ununderstood_suppress_switch"
+                            )
+
+                            AnimatedVisibility(visible = state.suppressReplyWhenUnunderstood) {
+                                Surface(
+                                    color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.4f),
+                                    shape = MaterialTheme.shapes.small
+                                ) {
+                                    Text(
+                                        text = stringResource(R.string.ai_ununderstood_suppressed_active_hint),
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .padding(10.dp)
+                                    )
+                                }
+                            }
+
+                            HorizontalDivider()
+
+                            Text(
+                                text = stringResource(R.string.ai_ununderstood_fallback_modes_title),
+                                style = MaterialTheme.typography.labelLarge
+                            )
+
+                            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                                UnunderstoodFallbackMode.entries.forEach { mode ->
+                                    val isSelected = state.ununderstoodFallbackMode == mode
+                                    Surface(
+                                        shape = MaterialTheme.shapes.small,
+                                        color = if (isSelected) {
+                                            MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.45f)
+                                        } else {
+                                            MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.28f)
+                                        },
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .minimumInteractiveComponentSize()
+                                            .selectable(
+                                                selected = isSelected,
+                                                onClick = { viewModel.selectUnunderstoodFallbackMode(mode) },
+                                                role = Role.RadioButton
+                                            )
+                                            .testTag("ai_ununderstood_mode_${mode.name}")
+                                    ) {
+                                        Row(
+                                            modifier = Modifier
+                                                .fillMaxWidth()
+                                                .padding(horizontal = 12.dp, vertical = 10.dp),
+                                            verticalAlignment = Alignment.CenterVertically,
+                                            horizontalArrangement = Arrangement.spacedBy(10.dp)
+                                        ) {
+                                            RadioButton(
+                                                selected = isSelected,
+                                                onClick = null
+                                            )
+                                            Column(modifier = Modifier.weight(1f)) {
+                                                Text(
+                                                    text = mode.labelAr,
+                                                    style = MaterialTheme.typography.bodyLarge
+                                                )
+                                                Text(
+                                                    text = mode.descriptionAr,
+                                                    style = MaterialTheme.typography.bodySmall,
+                                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                                )
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+
+                            AnimatedVisibility(
+                                visible = state.ununderstoodFallbackMode == UnunderstoodFallbackMode.CUSTOM_REPLY
+                            ) {
+                                OutlinedTextField(
+                                    value = state.ununderstoodCustomReply,
+                                    onValueChange = viewModel::updateUnunderstoodCustomReply,
+                                    label = { Text(stringResource(R.string.ai_ununderstood_custom_reply_label)) },
+                                    placeholder = { Text(stringResource(R.string.ai_ununderstood_custom_reply_hint)) },
+                                    minLines = 2,
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .testTag("ai_ununderstood_custom_reply_input")
+                                )
+                            }
+                        }
+                    }
+                }
+
+                // 6. System Prompt, Safe Fallback & Save (Memory & Tools moved to ToolsAndMemoryScreen)
                 item {
                     Card(
                         modifier = Modifier.fillMaxWidth(),

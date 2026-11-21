@@ -49,6 +49,21 @@ enum class ReplyLanguage(
     CUSTOM("لغة محددة", "اكتب الرد النهائي باللغة التالية:")
 }
 
+enum class UnunderstoodFallbackMode(
+    val labelAr: String,
+    val descriptionAr: String
+) {
+    NO_REPLY("عدم الرد", "لا يرسل التطبيق أي رسالة عند عدم فهم مقصد العميل."),
+    ASK_CLARIFICATION(
+        "طلب التوضيح",
+        "يرسل سؤالاً واحداً مختصراً: «لم أفهم طلبك بشكل واضح، هل يمكنك توضيحه؟»"
+    ),
+    CUSTOM_REPLY(
+        "رد احتياطي مخصص",
+        "يسمح لك بكتابة رسالة احتياطية مخصصة تُرسل عند تعذر فهم الطلب."
+    )
+}
+
 data class AiSettingsState(
     val enabled: Boolean = false,
     val provider: AIReplyEngine.Provider = AIReplyEngine.Provider.OPENAI,
@@ -78,7 +93,10 @@ data class AiSettingsState(
     val customReplyLanguage: String = "",
     val useConversationContext: Boolean = true,
     val useKeywordRules: Boolean = true,
-    val webhookToolEnabled: Boolean = true
+    val webhookToolEnabled: Boolean = true,
+    val suppressReplyWhenUnunderstood: Boolean = true,
+    val ununderstoodFallbackMode: UnunderstoodFallbackMode = UnunderstoodFallbackMode.NO_REPLY,
+    val ununderstoodCustomReply: String = DEFAULT_UNUNDERSTOOD_CUSTOM_REPLY
 ) {
     fun effectivePrimaryModel(): String =
         primaryModel.trim().ifBlank { model.trim().ifBlank { provider.defaultModels.first() } }
@@ -106,6 +124,9 @@ data class AiSettingsState(
         else -> replyLanguage.promptInstruction
     }
 
+    fun effectiveUnunderstoodCustomReply(): String =
+        ununderstoodCustomReply.trim().ifBlank { DEFAULT_UNUNDERSTOOD_CUSTOM_REPLY }
+
     companion object {
         const val DEFAULT_SYSTEM_PROMPT =
             "أنت مساعد ذكي للرد التلقائي على رسائل العملاء بأسلوب مهذب ومختصر باللغة العربية."
@@ -116,6 +137,10 @@ data class AiSettingsState(
         const val DEFAULT_MAX_REPLY_LENGTH_CHARS = 320
         const val MIN_REPLY_LENGTH_CHARS = 40
         const val MAX_REPLY_LENGTH_CHARS = 2000
+        const val DEFAULT_CLARIFICATION_QUESTION =
+            "لم أفهم طلبك بشكل واضح، هل يمكنك توضيحه؟"
+        const val DEFAULT_UNUNDERSTOOD_CUSTOM_REPLY =
+            "عذراً، لم أتمكن من فهم طلبك. هل يمكنك توضيحه أكثر؟"
     }
 }
 
@@ -191,6 +216,12 @@ class AiSettingsPrefs internal constructor(
             putBoolean(KEY_USE_CONVERSATION_CONTEXT, settings.useConversationContext)
             putBoolean(KEY_USE_KEYWORD_RULES, settings.useKeywordRules)
             putBoolean(KEY_WEBHOOK_TOOL_ENABLED, settings.webhookToolEnabled)
+            putBoolean(KEY_SUPPRESS_UNUNDERSTOOD, settings.suppressReplyWhenUnunderstood)
+            putString(KEY_UNUNDERSTOOD_FALLBACK_MODE, settings.ununderstoodFallbackMode.name)
+            putString(
+                KEY_UNUNDERSTOOD_CUSTOM_REPLY,
+                settings.ununderstoodCustomReply.trim().ifBlank { AiSettingsState.DEFAULT_UNUNDERSTOOD_CUSTOM_REPLY }
+            )
         }
         _state.value = read()
     }
@@ -228,6 +259,15 @@ class AiSettingsPrefs internal constructor(
         val language = runCatching {
             ReplyLanguage.valueOf(prefs.getString(KEY_REPLY_LANGUAGE, ReplyLanguage.AUTO.name) ?: ReplyLanguage.AUTO.name)
         }.getOrDefault(ReplyLanguage.AUTO)
+
+        val ununderstoodMode = runCatching {
+            UnunderstoodFallbackMode.valueOf(
+                prefs.getString(
+                    KEY_UNUNDERSTOOD_FALLBACK_MODE,
+                    UnunderstoodFallbackMode.NO_REPLY.name
+                ) ?: UnunderstoodFallbackMode.NO_REPLY.name
+            )
+        }.getOrDefault(UnunderstoodFallbackMode.NO_REPLY)
 
         return AiSettingsState(
             enabled = prefs.getBoolean(KEY_ENABLED, false),
@@ -277,7 +317,13 @@ class AiSettingsPrefs internal constructor(
             customReplyLanguage = prefs.getString(KEY_CUSTOM_REPLY_LANGUAGE, "").orEmpty(),
             useConversationContext = prefs.getBoolean(KEY_USE_CONVERSATION_CONTEXT, true),
             useKeywordRules = prefs.getBoolean(KEY_USE_KEYWORD_RULES, true),
-            webhookToolEnabled = prefs.getBoolean(KEY_WEBHOOK_TOOL_ENABLED, true)
+            webhookToolEnabled = prefs.getBoolean(KEY_WEBHOOK_TOOL_ENABLED, true),
+            suppressReplyWhenUnunderstood = prefs.getBoolean(KEY_SUPPRESS_UNUNDERSTOOD, true),
+            ununderstoodFallbackMode = ununderstoodMode,
+            ununderstoodCustomReply = prefs.getString(
+                KEY_UNUNDERSTOOD_CUSTOM_REPLY,
+                AiSettingsState.DEFAULT_UNUNDERSTOOD_CUSTOM_REPLY
+            ).orEmpty().ifBlank { AiSettingsState.DEFAULT_UNUNDERSTOOD_CUSTOM_REPLY }
         )
     }
 
@@ -312,6 +358,9 @@ class AiSettingsPrefs internal constructor(
         private const val KEY_USE_CONVERSATION_CONTEXT = "ai_use_conversation_context"
         private const val KEY_USE_KEYWORD_RULES = "ai_use_keyword_rules"
         private const val KEY_WEBHOOK_TOOL_ENABLED = "ai_webhook_tool_enabled"
+        private const val KEY_SUPPRESS_UNUNDERSTOOD = "ai_suppress_reply_when_ununderstood"
+        private const val KEY_UNUNDERSTOOD_FALLBACK_MODE = "ai_ununderstood_fallback_mode"
+        private const val KEY_UNUNDERSTOOD_CUSTOM_REPLY = "ai_ununderstood_custom_reply"
 
         const val KEY_REF_NEW_API = "ai_api_key_new_api"
         const val KEY_REF_OLLAMA = "ai_api_key_ollama"

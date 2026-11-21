@@ -26,4 +26,13 @@
     <string name="test_reply_reset_desc">إعادة تعيين المحادثة</string>
     <string name="test_reply_mode_group">وضع المجموعة (اضغط للتبديل)</string>
     <string name="test_reply_mode_private">وضع المحادثة الفردية (اضغط للتبديل)</string>
+
+    <!-- AI Settings: Ununderstood Messages Handling -->
+    <string name="ai_ununderstood_section_title">التعامل مع الرسائل غير المفهومة</string>
+    <string name="ai_ununderstood_suppress_title">عدم الرد عند عدم فهم الرسالة</string>
+    <string name="ai_ununderstood_suppress_subtitle">عند التفعيل، لا يرسل التطبيق أي إجابة تخمينية أو منتجات غير مرتبطة عندما تكون نية العميل مجهولة.</string>
+    <string name="ai_ununderstood_fallback_modes_title">السلوك الاحتياطي عند التعطيل</string>
+    <string name="ai_ununderstood_suppressed_active_hint">الوضع الصامت مفعّل حالياً؛ سيتم تفعيل السلوك المختار أدناه فقط عند إيقاف المفتاح الرئيسي.</string>
+    <string name="ai_ununderstood_custom_reply_label">نص الرد الاحتياطي المخصص</string>
+    <string name="ai_ununderstood_custom_reply_hint">عذراً، لم أتمكن من فهم طلبك. هل يمكنك توضيحه أكثر؟</string>
 </resources>

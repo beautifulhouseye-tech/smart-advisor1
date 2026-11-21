@@ -61,7 +61,8 @@ class NotificationCoordinator internal constructor(
     private val aiSettingsPrefs: AiSettingsPrefs? = null,
     private val clockMs: () -> Long = { System.currentTimeMillis() },
     private val queueScheduler: ((delayMs: Long) -> Unit)? = null,
-    private val conversationMemoryManager: ConversationMemoryManager? = null
+    private val conversationMemoryManager: ConversationMemoryManager? = null,
+    private val diagnosticLogger: SafeDiagnosticLogger? = null
 ) {
     @Inject
     constructor(
@@ -76,7 +77,8 @@ class NotificationCoordinator internal constructor(
         rateLimiter: TokenBucketRateLimiter,
         workManager: WorkManager,
         aiSettingsPrefs: AiSettingsPrefs,
-        conversationMemoryManager: ConversationMemoryManager
+        conversationMemoryManager: ConversationMemoryManager,
+        diagnosticLogger: SafeDiagnosticLogger
     ) : this(
         autoReplyEngine = autoReplyEngine,
         replyDispatcher = replyDispatcher,
@@ -91,7 +93,8 @@ class NotificationCoordinator internal constructor(
         aiSettingsPrefs = aiSettingsPrefs,
         clockMs = { System.currentTimeMillis() },
         queueScheduler = null,
-        conversationMemoryManager = conversationMemoryManager
+        conversationMemoryManager = conversationMemoryManager,
+        diagnosticLogger = diagnosticLogger
     )
 
     internal constructor(
@@ -253,6 +256,14 @@ class NotificationCoordinator internal constructor(
             timeoutSeconds = effectiveTimeoutSeconds
         )
         if (!idempotencyGuard.tryAcquireReservation(msgKey, leaseDurationMs = leaseMs)) {
+            diagnosticLogger?.log(
+                tag = DiagnosticEventTag.DUPLICATE_BLOCKED,
+                conversationId = convKey,
+                messageId = msgKey,
+                detectedStatus = MessageProcessingStatus.DUPLICATE_MESSAGE.name,
+                decision = "IDEMPOTENCY_RESERVATION_DENIED",
+                errorSource = "IdempotencyGuard"
+            )
             recordSkip(payload, msgKey, convKey, MessageQueueWorker.STATUS_SKIPPED_DEDUP, "رسالة مكررة أو قيد المعالجة", now)
             return CoordinatorResult(msgKey, MessageQueueWorker.STATUS_SKIPPED_DEDUP)
         }
@@ -316,6 +327,18 @@ class NotificationCoordinator internal constructor(
             is LocalOutcome.SendDeliveryUnknown -> {
                 idempotencyGuard.markDeliveryUnknown(msgKey)
                 CoordinatorResult(msgKey, MessageQueueWorker.STATUS_DELIVERY_UNKNOWN)
+            }
+            is LocalOutcome.SuppressedUnunderstood -> {
+                idempotencyGuard.markCompleted(msgKey)
+                diagnosticLogger?.log(
+                    tag = DiagnosticEventTag.REPLY_SUPPRESSED,
+                    conversationId = convKey,
+                    messageId = msgKey,
+                    detectedStatus = outcome.statusLabel,
+                    decision = "NOTIFICATION_SUPPRESSED_COMPLETED",
+                    errorSource = "NotificationCoordinator"
+                )
+                CoordinatorResult(msgKey, "REPLY_SUPPRESSED", replyText = "", isHandled = false)
             }
             LocalOutcome.NoMatch -> {
                 handleExternalFallback(

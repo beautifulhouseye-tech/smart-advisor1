@@ -54,6 +54,10 @@ sealed class LocalOutcome {
     data object BlockedRate : LocalOutcome()
     data class SendFailedConfirmed(val error: String) : LocalOutcome()
     data class SendDeliveryUnknown(val error: String) : LocalOutcome()
+    data class SuppressedUnunderstood(
+        val reason: String = "",
+        val statusLabel: String = "UNKNOWN_INTENT"
+    ) : LocalOutcome()
 }
 
 @Singleton
@@ -69,9 +73,39 @@ class AutoReplyEngine internal constructor(
     private val conversationMemoryManager: ConversationMemoryManager? = null,
     private val smartCollaborationCoordinator: SmartCollaborationCoordinator? = null,
     private val injectedUnifiedService: UnifiedSmartReplyService? = null,
-    private val clockMs: () -> Long = { System.currentTimeMillis() }
+    private val clockMs: () -> Long = { System.currentTimeMillis() },
+    private val diagnosticLogger: SafeDiagnosticLogger = SafeDiagnosticLogger(secretVault, clockMs)
 ) {
     @Inject
+    constructor(
+        repository: AutoMateRepository,
+        pendingReplyCoordinator: PendingReplyCoordinator,
+        menuReplyManager: MenuReplyManager,
+        followUpScheduler: FollowUpScheduler,
+        aiSettingsPrefs: AiSettingsPrefs,
+        aiReplyEngine: AIReplyEngine,
+        secretVault: SecretVault,
+        replyDispatcher: ReplyDispatcher,
+        conversationMemoryManager: ConversationMemoryManager,
+        smartCollaborationCoordinator: SmartCollaborationCoordinator,
+        unifiedSmartReplyService: UnifiedSmartReplyService,
+        diagnosticLogger: SafeDiagnosticLogger
+    ) : this(
+        repository = repository,
+        pendingReplyCoordinator = pendingReplyCoordinator,
+        menuReplyManager = menuReplyManager,
+        followUpScheduler = followUpScheduler,
+        aiSettingsPrefs = aiSettingsPrefs,
+        aiReplyEngine = aiReplyEngine,
+        secretVault = secretVault,
+        replyDispatcher = replyDispatcher,
+        conversationMemoryManager = conversationMemoryManager,
+        smartCollaborationCoordinator = smartCollaborationCoordinator,
+        injectedUnifiedService = unifiedSmartReplyService,
+        clockMs = { System.currentTimeMillis() },
+        diagnosticLogger = diagnosticLogger
+    )
+
     constructor(
         repository: AutoMateRepository,
         pendingReplyCoordinator: PendingReplyCoordinator,
@@ -159,7 +193,9 @@ class AutoReplyEngine internal constructor(
             smartAdvisorClient = null,
             smartAdvisorPrefs = null,
             conversationMemoryManager = conversationMemoryManager,
-            smartCollaborationCoordinator = smartCollaborationCoordinator
+            smartCollaborationCoordinator = smartCollaborationCoordinator,
+            clockMs = clockMs,
+            diagnosticLogger = diagnosticLogger
         )
     }
 
@@ -237,6 +273,33 @@ class AutoReplyEngine internal constructor(
 
         if (decision.blockedDisabled) return LocalOutcome.BlockedDisabled
         if (decision.blockedPolicy) return LocalOutcome.BlockedPolicy
+        if (decision.suppressedByUnknownIntent) {
+            val statusName = decision.processingClassification?.status?.name
+                ?: MessageProcessingStatus.UNKNOWN_INTENT.name
+            val safeReason = SensitiveDataRedactor.scrub(
+                decision.processingClassification?.failureReason?.takeIf { it.isNotBlank() }
+                    ?: "تم كتم الرد تلقائياً لعدم فهم الرسالة ($statusName)",
+                secretVault
+            )
+            repository.recordReplyLog(
+                ReplyLogEntity(
+                    senderName = incoming.senderName,
+                    packageName = incoming.packageName,
+                    incomingMessage = SensitiveDataRedactor.scrub(incoming.messageText, secretVault),
+                    sentReply = safeReason,
+                    isGroup = incoming.isGroup,
+                    deliveryMethod = DELIVERY_SKIPPED_UNKNOWN_INTENT,
+                    msgKey = incoming.msgKey,
+                    conversationKey = conversationKey,
+                    sourceCategory = statusName,
+                    matchedRuleKeyword = ""
+                )
+            )
+            return LocalOutcome.SuppressedUnunderstood(
+                reason = safeReason,
+                statusLabel = statusName
+            )
+        }
 
         val matchedRule = decision.matchedRule
         val resolvedRuleContent = decision.resolvedRuleContent
@@ -494,5 +557,6 @@ class AutoReplyEngine internal constructor(
 
     companion object {
         private const val TAG = "AutoReplyEngine"
+        const val DELIVERY_SKIPPED_UNKNOWN_INTENT = "SKIPPED_UNKNOWN_INTENT"
     }
 }

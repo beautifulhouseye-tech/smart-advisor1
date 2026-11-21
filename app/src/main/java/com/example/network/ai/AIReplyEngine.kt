@@ -3,6 +3,8 @@ package com.example.network.ai
 import com.example.data.preferences.AiSettingsPrefs
 import com.example.data.preferences.AiSettingsState
 import com.example.data.preferences.ResponseLength
+import com.example.engine.EngineFailureCategory
+import com.example.engine.UnunderstoodIntentPolicy
 import com.example.network.HttpTransport
 import com.example.network.security.SecretVault
 import com.example.network.security.SensitiveDataRedactor
@@ -19,6 +21,8 @@ import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.longOrNull
+import java.io.InterruptedIOException
+import java.net.SocketTimeoutException
 import java.net.URI
 import javax.inject.Inject
 import javax.inject.Singleton
@@ -97,7 +101,8 @@ class AIReplyEngine @Inject constructor(
         val switchedToFallback: Boolean,
         val primaryLatencyMs: Long = 0L,
         val fallbackLatencyMs: Long = 0L,
-        val redactedError: String? = null
+        val redactedError: String? = null,
+        val failureCategory: EngineFailureCategory = EngineFailureCategory.NONE
     )
 
     data class ConnectionTestOutcome(
@@ -203,6 +208,8 @@ class AIReplyEngine @Inject constructor(
         )
         val primaryLatencyMs = ((System.nanoTime() - startPrimaryNs) / 1_000_000L).coerceAtLeast(1L)
 
+        var primaryFailureCategory = primaryResult.failureCategory
+        var primaryErrorText = primaryResult.error
         if (!primaryResult.text.isNullOrBlank()) {
             val decision = parseStructuredDecision(primaryResult.text)
             if (decision != null && isUsableDecision(decision)) {
@@ -211,12 +218,17 @@ class AIReplyEngine @Inject constructor(
                     primaryEngineLabel = primaryLabel,
                     activeEngineLabel = primaryLabel,
                     switchedToFallback = false,
-                    primaryLatencyMs = primaryLatencyMs
+                    primaryLatencyMs = primaryLatencyMs,
+                    failureCategory = EngineFailureCategory.NONE
                 )
             }
+            primaryFailureCategory = EngineFailureCategory.INVALID_RESPONSE
+            primaryErrorText = "استجابة غير صالحة أو فارغة من المحرك الرئيسي"
+        } else if (primaryFailureCategory == EngineFailureCategory.NONE) {
+            primaryFailureCategory = EngineFailureCategory.SERVICE_ERROR
         }
 
-        val primaryError = primaryResult.error ?: "فشل الحصول على استجابة من المحرك الرئيسي"
+        val primaryError = primaryErrorText ?: "فشل الحصول على استجابة من المحرك الرئيسي"
         if (!settings.fallbackEnabled) {
             return CollaborationAiOutcome(
                 decision = null,
@@ -224,7 +236,8 @@ class AIReplyEngine @Inject constructor(
                 activeEngineLabel = primaryLabel,
                 switchedToFallback = false,
                 primaryLatencyMs = primaryLatencyMs,
-                redactedError = redactError(primaryError)
+                redactedError = redactError(primaryError),
+                failureCategory = primaryFailureCategory
             )
         }
 
@@ -239,6 +252,8 @@ class AIReplyEngine @Inject constructor(
         )
         val fallbackLatencyMs = ((System.nanoTime() - startFallbackNs) / 1_000_000L).coerceAtLeast(1L)
 
+        var fallbackFailureCategory = fallbackResult.failureCategory
+        var fallbackErrorText = fallbackResult.error
         if (!fallbackResult.text.isNullOrBlank()) {
             val decision = parseStructuredDecision(fallbackResult.text)
             if (decision != null && isUsableDecision(decision)) {
@@ -249,16 +264,32 @@ class AIReplyEngine @Inject constructor(
                     switchedToFallback = true,
                     primaryLatencyMs = primaryLatencyMs,
                     fallbackLatencyMs = fallbackLatencyMs,
-                    redactedError = redactError(primaryError)
+                    redactedError = redactError(primaryError),
+                    failureCategory = EngineFailureCategory.NONE
                 )
             }
+            fallbackFailureCategory = EngineFailureCategory.INVALID_RESPONSE
+            fallbackErrorText = "استجابة غير صالحة أو فارغة من المحرك الاحتياطي"
+        } else if (fallbackFailureCategory == EngineFailureCategory.NONE) {
+            fallbackFailureCategory = EngineFailureCategory.SERVICE_ERROR
+        }
+
+        val effectiveFailureCategory = when {
+            primaryFailureCategory == EngineFailureCategory.TIMEOUT &&
+                fallbackFailureCategory == EngineFailureCategory.TIMEOUT -> EngineFailureCategory.TIMEOUT
+            primaryFailureCategory == EngineFailureCategory.INVALID_RESPONSE &&
+                fallbackFailureCategory == EngineFailureCategory.INVALID_RESPONSE -> EngineFailureCategory.INVALID_RESPONSE
+            fallbackFailureCategory == EngineFailureCategory.TIMEOUT ||
+                primaryFailureCategory == EngineFailureCategory.TIMEOUT -> EngineFailureCategory.TIMEOUT
+            fallbackFailureCategory == EngineFailureCategory.INVALID_RESPONSE -> EngineFailureCategory.INVALID_RESPONSE
+            else -> EngineFailureCategory.SERVICE_ERROR
         }
 
         val combinedError = buildString {
             append(primaryError)
-            if (!fallbackResult.error.isNullOrBlank()) {
+            if (!fallbackErrorText.isNullOrBlank()) {
                 append(" | الاحتياطي: ")
-                append(fallbackResult.error)
+                append(fallbackErrorText)
             }
         }
         return CollaborationAiOutcome(
@@ -268,7 +299,8 @@ class AIReplyEngine @Inject constructor(
             switchedToFallback = true,
             primaryLatencyMs = primaryLatencyMs,
             fallbackLatencyMs = fallbackLatencyMs,
-            redactedError = redactError(combinedError)
+            redactedError = redactError(combinedError),
+            failureCategory = effectiveFailureCategory
         )
     }
 
@@ -318,7 +350,8 @@ class AIReplyEngine @Inject constructor(
         val text: String? = null,
         val statusCode: Int = -1,
         val latencyMs: Long = 0L,
-        val error: String? = null
+        val error: String? = null,
+        val failureCategory: EngineFailureCategory = EngineFailureCategory.NONE
     )
 
     private suspend fun executeEngineTurn(
@@ -335,12 +368,16 @@ class AIReplyEngine @Inject constructor(
                     val urlCheck = validateExternalUrl(baseUrl, "/v1/chat/completions")
                     if (urlCheck !is UrlValidationResult.Valid) {
                         return RawTurnCallResult(
-                            error = (urlCheck as UrlValidationResult.Invalid).errorAr
+                            error = (urlCheck as UrlValidationResult.Invalid).errorAr,
+                            failureCategory = EngineFailureCategory.SERVICE_ERROR
                         )
                     }
                     val apiKey = resolvePrimaryNewApiKey()
                     if (apiKey.isBlank()) {
-                        return RawTurnCallResult(error = "مفتاح New API غير مهيأ في SecretVault")
+                        return RawTurnCallResult(
+                            error = "مفتاح New API غير مهيأ في SecretVault",
+                            failureCategory = EngineFailureCategory.SERVICE_ERROR
+                        )
                     }
                     callOpenAiCompatible(
                         endpointUrl = urlCheck.resolvedUrl,
@@ -357,7 +394,10 @@ class AIReplyEngine @Inject constructor(
                 Provider.OPENAI -> {
                     val apiKey = vault.get(AiSettingsPrefs.apiKeyRefFor(Provider.OPENAI)).trim()
                     if (apiKey.isBlank()) {
-                        return RawTurnCallResult(error = "مفتاح OpenAI غير مهيأ في SecretVault")
+                        return RawTurnCallResult(
+                            error = "مفتاح OpenAI غير مهيأ في SecretVault",
+                            failureCategory = EngineFailureCategory.SERVICE_ERROR
+                        )
                     }
                     callOpenAiCompatible(
                         endpointUrl = OPENAI_URL,
@@ -374,7 +414,10 @@ class AIReplyEngine @Inject constructor(
                 Provider.GEMINI -> {
                     val apiKey = vault.get(AiSettingsPrefs.apiKeyRefFor(Provider.GEMINI)).trim()
                     if (apiKey.isBlank()) {
-                        return RawTurnCallResult(error = "مفتاح Gemini غير مهيأ في SecretVault")
+                        return RawTurnCallResult(
+                            error = "مفتاح Gemini غير مهيأ في SecretVault",
+                            failureCategory = EngineFailureCategory.SERVICE_ERROR
+                        )
                     }
                     val contextSummary = recentTurns.joinToString("\n") { "${it.role}: ${it.text}" }
                     callGeminiDetailed(
@@ -400,11 +443,17 @@ class AIReplyEngine @Inject constructor(
                 val baseUrl = settings.primaryBaseUrl.trim()
                 val urlCheck = validateExternalUrl(baseUrl, "/v1/chat/completions")
                 if (urlCheck !is UrlValidationResult.Valid) {
-                    return RawTurnCallResult(error = (urlCheck as UrlValidationResult.Invalid).errorAr)
+                    return RawTurnCallResult(
+                        error = (urlCheck as UrlValidationResult.Invalid).errorAr,
+                        failureCategory = EngineFailureCategory.SERVICE_ERROR
+                    )
                 }
                 val apiKey = resolvePrimaryNewApiKey()
                 if (apiKey.isBlank()) {
-                    return RawTurnCallResult(error = "مفتاح بوابة New API غير متوفر للاحتياطي")
+                    return RawTurnCallResult(
+                        error = "مفتاح بوابة New API غير متوفر للاحتياطي",
+                        failureCategory = EngineFailureCategory.SERVICE_ERROR
+                    )
                 }
                 return callOpenAiCompatible(
                     endpointUrl = urlCheck.resolvedUrl,
@@ -450,7 +499,10 @@ class AIReplyEngine @Inject constructor(
                     return RawTurnCallResult(text = reply, statusCode = 200)
                 }
             }
-            return RawTurnCallResult(error = (urlCheck as UrlValidationResult.Invalid).errorAr)
+            return RawTurnCallResult(
+                error = (urlCheck as UrlValidationResult.Invalid).errorAr,
+                failureCategory = EngineFailureCategory.SERVICE_ERROR
+            )
         }
 
         val apiKey = vault.get(AiSettingsPrefs.apiKeyRefFor(Provider.OLLAMA)).trim()
@@ -553,7 +605,10 @@ class AIReplyEngine @Inject constructor(
         requireApiKey: Boolean
     ): RawTurnCallResult {
         if (requireApiKey && apiKey.isBlank()) {
-            return RawTurnCallResult(error = "مفتاح API مطلوب")
+            return RawTurnCallResult(
+                error = "مفتاح API مطلوب",
+                failureCategory = EngineFailureCategory.SERVICE_ERROR
+            )
         }
 
         val messages = buildJsonArray {
@@ -612,7 +667,8 @@ class AIReplyEngine @Inject constructor(
                     RawTurnCallResult(
                         statusCode = result.code,
                         latencyMs = result.ms,
-                        error = "استجابة فارغة أو غير صالحة من الخادم"
+                        error = "استجابة فارغة أو غير صالحة من الخادم",
+                        failureCategory = EngineFailureCategory.INVALID_RESPONSE
                     )
                 } else {
                     RawTurnCallResult(text = parsed, statusCode = result.code, latencyMs = result.ms)
@@ -621,12 +677,14 @@ class AIReplyEngine @Inject constructor(
             is HttpTransport.Result.Conflict -> RawTurnCallResult(
                 statusCode = result.code,
                 latencyMs = result.ms,
-                error = "تعارض من الخادم (HTTP 409)"
+                error = "تعارض من الخادم (HTTP 409)",
+                failureCategory = EngineFailureCategory.SERVICE_ERROR
             )
             is HttpTransport.Result.Failure -> RawTurnCallResult(
                 statusCode = result.code,
                 latencyMs = result.ms,
-                error = redactError(result.error)
+                error = redactError(result.error),
+                failureCategory = classifyFailure(result)
             )
         }
     }
@@ -710,7 +768,8 @@ class AIReplyEngine @Inject constructor(
                     RawTurnCallResult(
                         statusCode = result.code,
                         latencyMs = result.ms,
-                        error = "استجابة Ollama فارغة"
+                        error = "استجابة Ollama فارغة",
+                        failureCategory = EngineFailureCategory.INVALID_RESPONSE
                     )
                 } else {
                     RawTurnCallResult(text = parsed, statusCode = result.code, latencyMs = result.ms)
@@ -719,12 +778,14 @@ class AIReplyEngine @Inject constructor(
             is HttpTransport.Result.Conflict -> RawTurnCallResult(
                 statusCode = result.code,
                 latencyMs = result.ms,
-                error = "تعارض من الخادم (HTTP 409)"
+                error = "تعارض من الخادم (HTTP 409)",
+                failureCategory = EngineFailureCategory.SERVICE_ERROR
             )
             is HttpTransport.Result.Failure -> RawTurnCallResult(
                 statusCode = result.code,
                 latencyMs = result.ms,
-                error = redactError(result.error)
+                error = redactError(result.error),
+                failureCategory = classifyFailure(result)
             )
         }
     }
@@ -735,7 +796,12 @@ class AIReplyEngine @Inject constructor(
 
     private suspend fun callGeminiDetailed(msg: String, config: AIConfig, ctx: String): RawTurnCallResult {
         val apiKey = resolveApiKey(config)
-        if (apiKey.isBlank()) return RawTurnCallResult(error = "مفتاح Gemini غير مهيأ")
+        if (apiKey.isBlank()) {
+            return RawTurnCallResult(
+                error = "مفتاح Gemini غير مهيأ",
+                failureCategory = EngineFailureCategory.SERVICE_ERROR
+            )
+        }
 
         val model = config.model.ifBlank { "gemini-1.5-pro" }
         val combinedPrompt = buildString {
@@ -781,7 +847,12 @@ class AIReplyEngine @Inject constructor(
             is HttpTransport.Result.Success -> {
                 val parsed = parseGeminiResponse(result.body)
                 if (parsed.isNullOrBlank()) {
-                    RawTurnCallResult(statusCode = result.code, latencyMs = result.ms, error = "استجابة Gemini فارغة")
+                    RawTurnCallResult(
+                        statusCode = result.code,
+                        latencyMs = result.ms,
+                        error = "استجابة Gemini فارغة",
+                        failureCategory = EngineFailureCategory.INVALID_RESPONSE
+                    )
                 } else {
                     RawTurnCallResult(text = parsed, statusCode = result.code, latencyMs = result.ms)
                 }
@@ -789,12 +860,14 @@ class AIReplyEngine @Inject constructor(
             is HttpTransport.Result.Conflict -> RawTurnCallResult(
                 statusCode = result.code,
                 latencyMs = result.ms,
-                error = "تعارض من خادم Gemini (HTTP 409)"
+                error = "تعارض من خادم Gemini (HTTP 409)",
+                failureCategory = EngineFailureCategory.SERVICE_ERROR
             )
             is HttpTransport.Result.Failure -> RawTurnCallResult(
                 statusCode = result.code,
                 latencyMs = result.ms,
-                error = redactError(result.error)
+                error = redactError(result.error),
+                failureCategory = classifyFailure(result)
             )
         }
     }
@@ -804,7 +877,31 @@ class AIReplyEngine @Inject constructor(
             decision.needsStoreData ||
             decision.needsWebhookData ||
             decision.toolRequests.isNotEmpty() ||
-            decision.accountAction.isNotBlank()
+            decision.accountAction.isNotBlank() ||
+            (decision.isStructuredJson &&
+                UnunderstoodIntentPolicy.isExplicitUnknownDecision(
+                    intent = decision.intent,
+                    confidence = decision.confidence,
+                    isStructuredJson = decision.isStructuredJson,
+                    hasToolRequest = false,
+                    reply = decision.reply
+                ))
+
+    private fun classifyFailure(failure: HttpTransport.Result.Failure): EngineFailureCategory {
+        if (failure.code == 408 || failure.code == 504) return EngineFailureCategory.TIMEOUT
+        var t: Throwable? = failure.cause
+        while (t != null) {
+            if (t is SocketTimeoutException || t is InterruptedIOException) {
+                return EngineFailureCategory.TIMEOUT
+            }
+            t = t.cause
+        }
+        val err = failure.error.lowercase()
+        if (err.contains("timeout") || err.contains("timed out") || err.contains("مهلة")) {
+            return EngineFailureCategory.TIMEOUT
+        }
+        return EngineFailureCategory.SERVICE_ERROR
+    }
 
     fun parseStructuredDecision(rawText: String): AiStructuredDecision? {
         val trimmed = rawText.trim()

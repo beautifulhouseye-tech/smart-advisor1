@@ -4,6 +4,7 @@ import com.example.data.local.entity.ServerConfigEntity
 import com.example.data.local.entity.WebhookMode
 import com.example.data.preferences.AiSettingsPrefs
 import com.example.data.preferences.AiSettingsState
+import com.example.data.preferences.UnunderstoodFallbackMode
 import com.example.data.repository.ServerConfigRepository
 import com.example.data.security.SmartAdvisorPrefs
 import com.example.network.WebhookClient
@@ -27,7 +28,8 @@ class SmartCollaborationCoordinator(
     private val secretVault: SecretVault,
     private val serverRepo: ServerConfigRepository? = null,
     private val webhookClient: WebhookClient? = null,
-    private val clockMs: () -> Long = { System.currentTimeMillis() }
+    private val clockMs: () -> Long = { System.currentTimeMillis() },
+    private val diagnosticLogger: SafeDiagnosticLogger = SafeDiagnosticLogger(secretVault, clockMs)
 ) {
     @Inject
     constructor(
@@ -39,7 +41,8 @@ class SmartCollaborationCoordinator(
         memoryOutboxCoordinator: MemoryOutboxCoordinator,
         secretVault: SecretVault,
         serverRepo: ServerConfigRepository,
-        webhookClient: WebhookClient
+        webhookClient: WebhookClient,
+        diagnosticLogger: SafeDiagnosticLogger
     ) : this(
         aiSettingsPrefs = aiSettingsPrefs,
         aiReplyEngine = aiReplyEngine,
@@ -50,7 +53,8 @@ class SmartCollaborationCoordinator(
         secretVault = secretVault,
         serverRepo = serverRepo,
         webhookClient = webhookClient,
-        clockMs = { System.currentTimeMillis() }
+        clockMs = { System.currentTimeMillis() },
+        diagnosticLogger = diagnosticLogger
     )
 
     internal constructor(
@@ -72,7 +76,8 @@ class SmartCollaborationCoordinator(
         secretVault = secretVault,
         serverRepo = null,
         webhookClient = null,
-        clockMs = clockMs
+        clockMs = clockMs,
+        diagnosticLogger = SafeDiagnosticLogger(secretVault, clockMs)
     )
 
     data class CollaborationInput(
@@ -119,7 +124,10 @@ class SmartCollaborationCoordinator(
         val productMessage: ProductMessage? = null,
         val products: List<ProductMessage> = emptyList(),
         val storeName: String = "",
-        val fallbackTextReply: String = ""
+        val fallbackTextReply: String = "",
+        val processingClassification: MessageProcessingClassification? = null,
+        val suppressedByUnknownIntent: Boolean = false,
+        val engineFailureCategory: EngineFailureCategory = EngineFailureCategory.NONE
     )
 
     private data class CollectedToolNote(
@@ -246,10 +254,30 @@ class SmartCollaborationCoordinator(
         val usedNewApiFlag = aiSettings.provider == AIReplyEngine.Provider.NEW_API
 
         if (decision1 == null) {
+            val failureCat = if (pass1Outcome.failureCategory != EngineFailureCategory.NONE) {
+                pass1Outcome.failureCategory
+            } else {
+                EngineFailureCategory.SERVICE_ERROR
+            }
+            val techStatus = failureCat.toProcessingStatus()
+            val errorMsg = pass1Outcome.redactedError ?: "تعذر الاتصال بمحركات الذكاء الاصطناعي"
             aiSettingsPrefs.updateHealthStatus(
                 primaryStatus = "فشل أو متعذر",
                 fallbackStatus = if (pass1Outcome.switchedToFallback) "فشل الاحتياطي" else aiSettings.lastFallbackStatus,
-                lastErrorRedacted = pass1Outcome.redactedError ?: "تعذر الاتصال بمحركات الذكاء الاصطناعي"
+                lastErrorRedacted = errorMsg
+            )
+            diagnosticLogger.log(
+                tag = if (failureCat == EngineFailureCategory.TIMEOUT) {
+                    DiagnosticEventTag.TIMEOUT
+                } else {
+                    DiagnosticEventTag.SERVICE_ERROR
+                },
+                conversationId = conversationKey,
+                messageId = input.messageId,
+                detectedStatus = techStatus.name,
+                decision = "TECHNICAL_ERROR_NO_UNKNOWN_INTENT_CONTROL",
+                errorSource = pass1Outcome.activeEngineLabel,
+                detail = errorMsg
             )
             return CollaborationOutcome(
                 replyText = null,
@@ -261,7 +289,17 @@ class SmartCollaborationCoordinator(
                 memoryLoaded = memoryLoaded,
                 redactedError = pass1Outcome.redactedError,
                 stageLatenciesMs = latencies,
-                currentTopic = contextEntity.currentTopic
+                currentTopic = contextEntity.currentTopic,
+                processingClassification = MessageProcessingClassification(
+                    status = techStatus,
+                    confidence = 0.0,
+                    detectedIntent = "",
+                    finalReply = null,
+                    source = pass1Outcome.activeEngineLabel,
+                    failureReason = errorMsg
+                ),
+                suppressedByUnknownIntent = false,
+                engineFailureCategory = failureCat
             )
         }
 
@@ -270,6 +308,112 @@ class SmartCollaborationCoordinator(
             fallbackStatus = if (pass1Outcome.switchedToFallback) "نشط (${aiSettings.effectiveOllamaModel()})" else aiSettings.lastFallbackStatus,
             lastErrorRedacted = pass1Outcome.redactedError ?: ""
         )
+
+        val hasActiveContext = aiSettings.useConversationContext &&
+            conversationMemoryManager.hasActiveContextualHistory(contextEntity, excludeLastUserMessage = true)
+        val ununderstoodStatus = detectUnunderstoodStatus(
+            decision = decision1,
+            userMessage = input.messageText,
+            hasActiveContext = hasActiveContext
+        )
+        if (ununderstoodStatus != null) {
+            diagnosticLogger.log(
+                tag = if (ununderstoodStatus == MessageProcessingStatus.LOW_CONFIDENCE) {
+                    DiagnosticEventTag.LOW_CONFIDENCE
+                } else {
+                    DiagnosticEventTag.UNKNOWN_INTENT
+                },
+                conversationId = conversationKey,
+                messageId = input.messageId,
+                detectedStatus = ununderstoodStatus.name,
+                decision = "EVALUATE_UNUNDERSTOOD_POLICY",
+                errorSource = pass1Outcome.activeEngineLabel,
+                detail = "intent=${decision1.intent} confidence=${decision1.confidence}"
+            )
+            val candidateMode = aiSettings.ununderstoodFallbackMode
+            val suppressForLoop = !aiSettings.suppressReplyWhenUnunderstood &&
+                conversationMemoryManager.shouldSuppressClarificationLoop(conversationKey, candidateMode)
+            val (resolvedUnunderstoodReply, appliedMode) = UnunderstoodIntentPolicy.resolveUnunderstoodReply(
+                aiSettings = aiSettings,
+                status = ununderstoodStatus,
+                suppressForLoop = suppressForLoop
+            )
+            if (resolvedUnunderstoodReply.isNullOrBlank()) {
+                diagnosticLogger.log(
+                    tag = DiagnosticEventTag.REPLY_SUPPRESSED,
+                    conversationId = conversationKey,
+                    messageId = input.messageId,
+                    detectedStatus = ununderstoodStatus.name,
+                    decision = if (suppressForLoop) "LOOP_PREVENTION_SUPPRESSED" else "SUPPRESS_SETTING_OR_NO_REPLY",
+                    errorSource = pass1Outcome.activeEngineLabel
+                )
+                return CollaborationOutcome(
+                    replyText = null,
+                    conversationKey = conversationKey,
+                    usedNewApi = usedNewApiFlag,
+                    usedPrimaryEngine = pass1Outcome.primaryEngineLabel,
+                    activeEngine = pass1Outcome.activeEngineLabel,
+                    switchedToQwen = pass1Outcome.switchedToFallback,
+                    saIntent = decision1.intent,
+                    memoryLoaded = memoryLoaded,
+                    needsHuman = false,
+                    redactedError = pass1Outcome.redactedError,
+                    stageLatenciesMs = latencies,
+                    currentTopic = contextEntity.currentTopic,
+                    processingClassification = MessageProcessingClassification(
+                        status = ununderstoodStatus,
+                        confidence = decision1.confidence,
+                        detectedIntent = decision1.intent,
+                        finalReply = null,
+                        source = pass1Outcome.activeEngineLabel,
+                        failureReason = if (suppressForLoop) "clarification_loop_prevented" else "",
+                        suppressedBySetting = true,
+                        fallbackModeApplied = appliedMode
+                    ),
+                    suppressedByUnknownIntent = true,
+                    engineFailureCategory = EngineFailureCategory.NONE
+                )
+            }
+
+            if (appliedMode != null) {
+                conversationMemoryManager.recordUnunderstoodFallbackSent(conversationKey, appliedMode)
+            }
+            diagnosticLogger.log(
+                tag = DiagnosticEventTag.FALLBACK_USED,
+                conversationId = conversationKey,
+                messageId = input.messageId,
+                detectedStatus = ununderstoodStatus.name,
+                decision = appliedMode?.name ?: "UNUNDERSTOOD_FALLBACK",
+                errorSource = pass1Outcome.activeEngineLabel
+            )
+            return CollaborationOutcome(
+                replyText = resolvedUnunderstoodReply,
+                conversationKey = conversationKey,
+                usedNewApi = usedNewApiFlag,
+                usedPrimaryEngine = pass1Outcome.primaryEngineLabel,
+                activeEngine = pass1Outcome.activeEngineLabel,
+                switchedToQwen = pass1Outcome.switchedToFallback,
+                saIntent = decision1.intent,
+                memoryLoaded = memoryLoaded,
+                needsHuman = decision1.needsHuman,
+                safeFallbackUsed = true,
+                redactedError = pass1Outcome.redactedError,
+                stageLatenciesMs = latencies,
+                currentTopic = contextEntity.currentTopic,
+                fallbackTextReply = resolvedUnunderstoodReply,
+                processingClassification = MessageProcessingClassification(
+                    status = ununderstoodStatus,
+                    confidence = decision1.confidence,
+                    detectedIntent = decision1.intent,
+                    finalReply = resolvedUnunderstoodReply,
+                    source = pass1Outcome.activeEngineLabel,
+                    suppressedBySetting = false,
+                    fallbackModeApplied = appliedMode
+                ),
+                suppressedByUnknownIntent = false,
+                engineFailureCategory = EngineFailureCategory.NONE
+            )
+        }
 
         var currentDecision: AIReplyEngine.AiStructuredDecision = decision1
         var activeEngineLabel = pass1Outcome.activeEngineLabel
@@ -709,6 +853,21 @@ class SmartCollaborationCoordinator(
                     break
                 }
                 if (calledSmartAdvisor && !verifiedStoreDataUsed) {
+                    val synFailureCat = if (synthesisOutcome.failureCategory != EngineFailureCategory.NONE) {
+                        synthesisOutcome.failureCategory
+                    } else {
+                        EngineFailureCategory.SERVICE_ERROR
+                    }
+                    val synErr = synthesisOutcome.redactedError ?: "تعذر صياغة الرد النهائي"
+                    diagnosticLogger.log(
+                        tag = if (synFailureCat == EngineFailureCategory.TIMEOUT) DiagnosticEventTag.TIMEOUT else DiagnosticEventTag.SERVICE_ERROR,
+                        conversationId = conversationKey,
+                        messageId = input.messageId,
+                        detectedStatus = synFailureCat.toProcessingStatus().name,
+                        decision = "PASS2_SYNTHESIS_FAILED",
+                        errorSource = activeEngineLabel,
+                        detail = synErr
+                    )
                     return CollaborationOutcome(
                         replyText = null,
                         conversationKey = conversationKey,
@@ -727,9 +886,18 @@ class SmartCollaborationCoordinator(
                         toolRoundsUsed = roundsUsed,
                         verifiedStoreDataUsed = false,
                         memoryLoaded = memoryLoaded,
-                        redactedError = synthesisOutcome.redactedError ?: "تعذر صياغة الرد النهائي",
+                        redactedError = synErr,
                         stageLatenciesMs = latencies,
-                        currentTopic = contextEntity.currentTopic
+                        currentTopic = contextEntity.currentTopic,
+                        processingClassification = MessageProcessingClassification(
+                            status = synFailureCat.toProcessingStatus(),
+                            confidence = currentDecision.confidence,
+                            detectedIntent = currentDecision.intent,
+                            finalReply = null,
+                            source = activeEngineLabel,
+                            failureReason = synErr
+                        ),
+                        engineFailureCategory = synFailureCat
                     )
                 }
                 val safeFallback = buildSafeToolFallbackReply(
@@ -739,6 +907,21 @@ class SmartCollaborationCoordinator(
                     fallbackDraft = ""
                 )
                 if (safeFallback.isBlank()) {
+                    val synFailureCat = if (synthesisOutcome.failureCategory != EngineFailureCategory.NONE) {
+                        synthesisOutcome.failureCategory
+                    } else {
+                        EngineFailureCategory.SERVICE_ERROR
+                    }
+                    val synErr = synthesisOutcome.redactedError ?: finalRedactedError ?: "تعذر صياغة الرد النهائي"
+                    diagnosticLogger.log(
+                        tag = if (synFailureCat == EngineFailureCategory.TIMEOUT) DiagnosticEventTag.TIMEOUT else DiagnosticEventTag.SERVICE_ERROR,
+                        conversationId = conversationKey,
+                        messageId = input.messageId,
+                        detectedStatus = synFailureCat.toProcessingStatus().name,
+                        decision = "PASS2_SYNTHESIS_FAILED",
+                        errorSource = activeEngineLabel,
+                        detail = synErr
+                    )
                     return CollaborationOutcome(
                         replyText = null,
                         conversationKey = conversationKey,
@@ -759,7 +942,16 @@ class SmartCollaborationCoordinator(
                         memoryLoaded = memoryLoaded,
                         redactedError = synthesisOutcome.redactedError ?: finalRedactedError,
                         stageLatenciesMs = latencies,
-                        currentTopic = contextEntity.currentTopic
+                        currentTopic = contextEntity.currentTopic,
+                        processingClassification = MessageProcessingClassification(
+                            status = synFailureCat.toProcessingStatus(),
+                            confidence = currentDecision.confidence,
+                            detectedIntent = currentDecision.intent,
+                            finalReply = null,
+                            source = activeEngineLabel,
+                            failureReason = synErr
+                        ),
+                        engineFailureCategory = synFailureCat
                     )
                 }
                 currentDecision = currentDecision.copy(reply = safeFallback)
@@ -873,6 +1065,10 @@ class SmartCollaborationCoordinator(
             else -> cleanedReply.orEmpty()
         }
 
+        if (!resolvedReplyText.isNullOrBlank()) {
+            conversationMemoryManager.resetClarificationState(conversationKey)
+        }
+
         return CollaborationOutcome(
             replyText = resolvedReplyText,
             conversationKey = conversationKey,
@@ -902,8 +1098,50 @@ class SmartCollaborationCoordinator(
             productMessage = resolvedProductMessage,
             products = parsedKnowledge?.products.orEmpty(),
             storeName = parsedKnowledge?.storeName.orEmpty(),
-            fallbackTextReply = fallbackReply
+            fallbackTextReply = fallbackReply,
+            processingClassification = MessageProcessingClassification(
+                status = MessageProcessingStatus.UNDERSTOOD,
+                confidence = currentDecision.confidence,
+                detectedIntent = currentDecision.intent,
+                finalReply = resolvedReplyText,
+                source = activeEngineLabel
+            )
         )
+    }
+
+    private fun detectUnunderstoodStatus(
+        decision: AIReplyEngine.AiStructuredDecision,
+        userMessage: String,
+        hasActiveContext: Boolean
+    ): MessageProcessingStatus? {
+        val statusFromIntent = UnunderstoodIntentPolicy.classifyIntentToken(decision.intent)
+        if (statusFromIntent != null) return statusFromIntent
+
+        val isNoiseInput = UnunderstoodIntentPolicy.isMeaninglessNoiseInput(userMessage, hasActiveContext)
+        val hasToolRequest = requestsStoreKnowledge(decision) ||
+            requestsWebhookTool(decision) ||
+            decision.accountAction.isNotBlank()
+
+        if (isNoiseInput && !hasActiveContext) {
+            return MessageProcessingStatus.UNKNOWN_INTENT
+        }
+
+        if (decision.isStructuredJson &&
+            decision.confidence < UnunderstoodIntentPolicy.MIN_CONFIDENCE_THRESHOLD &&
+            !hasToolRequest &&
+            (!hasActiveContext || decision.reply.isBlank())
+        ) {
+            return MessageProcessingStatus.LOW_CONFIDENCE
+        }
+
+        if (decision.isStructuredJson &&
+            decision.confidence < UnunderstoodIntentPolicy.MIN_CONFIDENCE_THRESHOLD &&
+            isNoiseInput
+        ) {
+            return MessageProcessingStatus.LOW_CONFIDENCE
+        }
+
+        return null
     }
 
     private fun requestsStoreKnowledge(d: AIReplyEngine.AiStructuredDecision): Boolean =
@@ -1065,6 +1303,8 @@ class SmartCollaborationCoordinator(
             append("\nالتعليمات الصارمة:\n")
             append("- أجب بصيغة JSON صالحة بهذه الحقول: intent, confidence, needs_store_data, store_query, store_intent, needs_webhook_data, webhook_query, webhook_reason, tool_requests, needs_human, reply, account_action, account_action_confirmed, memory_update.\n")
             append("- قيم store_intent المسموحة: product_search, product_details, offers, store_info, store_location, shipping_policy, returns_policy, general.\n")
+            append("- تحقق من سياق المحادثة الحالي أولاً قبل الحكم بعدم الفهم: إذا أرسل العميل رداً قصيراً مرتبطاً بالسؤال أو المنتجات السابقة (مثل: نعم، لا، أكثر، الثاني، قارن، المنعش) فافهمه ضمن السياق وأجب بثقة واضحة.\n")
+            append("- إذا كانت الرسالة غير مفهومة أو عشوائية أو غامضة بلا دليل كافٍ حتى مع السياق: لا تخمّن نية العميل، ولا تطلب منتجات أو تصنيفات غير مرتبطة (اجعل needs_store_data=false و needs_webhook_data=false)، ولا تعِد إجابة قديمة غير مرتبطة؛ بل أعد intent=\"UNKNOWN_INTENT\" و confidence أقل من 0.45 و reply=\"\".\n")
             append("- يمكنك استدعاء Smart Advisor فقط أو Webhook فقط أو كليهما معاً أو عدم استدعاء أي أداة إذا كانت الرسالة محادثة عامة.\n")
             append("- لا تخترع أسعاراً أو توفر منتجات أو حالات طلبات؛ إذا احتجت بيانات المتجر اجعل needs_store_data=true، وإذا احتجت النظام الخارجي اجعل needs_webhook_data=true.\n")
             if (!saAvailable || capabilities?.accountActionsEnabled != true) {

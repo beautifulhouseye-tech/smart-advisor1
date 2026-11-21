@@ -7,6 +7,7 @@ import com.example.data.preferences.AiSettingsState
 import com.example.data.preferences.ReplyLanguage
 import com.example.data.preferences.ResponseLength
 import com.example.data.preferences.ResponseTone
+import com.example.data.preferences.UnunderstoodFallbackMode
 import com.example.network.ai.AIReplyEngine
 import com.example.network.security.SecretVault
 import dagger.hilt.android.lifecycle.HiltViewModel
@@ -47,6 +48,9 @@ data class AISettingsUiState(
     val useConversationContext: Boolean = true,
     val useKeywordRules: Boolean = true,
     val webhookToolEnabled: Boolean = true,
+    val suppressReplyWhenUnunderstood: Boolean = true,
+    val ununderstoodFallbackMode: UnunderstoodFallbackMode = UnunderstoodFallbackMode.NO_REPLY,
+    val ununderstoodCustomReply: String = AiSettingsState.DEFAULT_UNUNDERSTOOD_CUSTOM_REPLY,
     val isTesting: Boolean = false,
     val isTestingFallback: Boolean = false,
     val testResult: String? = null,
@@ -102,6 +106,9 @@ class AISettingsViewModel @Inject constructor(
             useConversationContext = current.useConversationContext,
             useKeywordRules = current.useKeywordRules,
             webhookToolEnabled = current.webhookToolEnabled,
+            suppressReplyWhenUnunderstood = current.suppressReplyWhenUnunderstood,
+            ununderstoodFallbackMode = current.ununderstoodFallbackMode,
+            ununderstoodCustomReply = current.ununderstoodCustomReply,
             lastPrimaryStatus = current.lastPrimaryStatus,
             lastFallbackStatus = current.lastFallbackStatus,
             lastErrorRedacted = current.lastErrorRedacted
@@ -256,6 +263,20 @@ class AISettingsViewModel @Inject constructor(
         _uiState.update { it.copy(webhookToolEnabled = enabled) }
     }
 
+    fun setSuppressReplyWhenUnunderstood(enabled: Boolean) {
+        _uiState.update { it.copy(suppressReplyWhenUnunderstood = enabled) }
+        persistSettings(showStatus = false)
+    }
+
+    fun selectUnunderstoodFallbackMode(mode: UnunderstoodFallbackMode) {
+        _uiState.update { it.copy(ununderstoodFallbackMode = mode) }
+        persistSettings(showStatus = false)
+    }
+
+    fun updateUnunderstoodCustomReply(reply: String) {
+        _uiState.update { it.copy(ununderstoodCustomReply = reply) }
+    }
+
     fun saveSettings() {
         persistSettings(showStatus = true, statusText = "تم حفظ إعدادات الذكاء الاصطناعي")
     }
@@ -404,7 +425,10 @@ class AISettingsViewModel @Inject constructor(
             customReplyLanguage = state.customReplyLanguage,
             useConversationContext = state.useConversationContext,
             useKeywordRules = state.useKeywordRules,
-            webhookToolEnabled = state.webhookToolEnabled
+            webhookToolEnabled = state.webhookToolEnabled,
+            suppressReplyWhenUnunderstood = state.suppressReplyWhenUnunderstood,
+            ununderstoodFallbackMode = state.ununderstoodFallbackMode,
+            ununderstoodCustomReply = state.ununderstoodCustomReply
         )
     }
 
