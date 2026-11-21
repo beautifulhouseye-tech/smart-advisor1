@@ -22,8 +22,6 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.HelpOutline
 import androidx.compose.material.icons.automirrored.filled.Send
-import androidx.compose.material.icons.filled.CheckCircle
-import androidx.compose.material.icons.filled.Error
 import androidx.compose.material.icons.filled.Key
 import androidx.compose.material.icons.filled.RestartAlt
 import androidx.compose.material.icons.filled.Save
@@ -70,6 +68,7 @@ import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.data.security.SmartAdvisorPrefs
+import com.example.ui.components.UnifiedTestResultCard
 import com.example.ui.viewmodel.SaSettingsViewModel
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -252,7 +251,11 @@ fun SaSettingsScreen(
                                     value = apiKeyInput,
                                     onValueChange = { newValue ->
                                         apiKeyInput = newValue
-                                        viewModel.updateApiKey(newValue)
+                                        if (newValue.trim().isNotEmpty()) {
+                                            viewModel.updateApiKey(newValue)
+                                        } else if (!hasKey) {
+                                            viewModel.updateApiKey("")
+                                        }
                                     },
                                     label = {
                                         Text(
@@ -295,11 +298,34 @@ fun SaSettingsScreen(
                                 )
                             }
 
-                            if (apiKeyRef.isNotBlank()) {
+                            if (hasKey) {
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Text(
+                                        text = "مفتاح API محفوظ ومشفّر في SecretVault ($apiKeyRef)",
+                                        style = MaterialTheme.typography.labelMedium,
+                                        color = MaterialTheme.colorScheme.primary,
+                                        modifier = Modifier.weight(1f)
+                                    )
+                                    TextButton(
+                                        onClick = {
+                                            apiKeyInput = ""
+                                            viewModel.clearApiKey()
+                                        },
+                                        modifier = Modifier.testTag("sa_clear_key_button")
+                                    ) {
+                                        Text("مسح المفتاح")
+                                    }
+                                }
+                            } else {
                                 Text(
-                                    text = "مرجع الخزنة الآمن: $apiKeyRef",
+                                    text = "تنبيه: يتطلب المسار مفتاح API عبر ترويسة X-SA-API-Key. أدخل المفتاح قبل الاختبار.",
                                     style = MaterialTheme.typography.labelMedium,
-                                    color = MaterialTheme.colorScheme.primary
+                                    color = MaterialTheme.colorScheme.error,
+                                    modifier = Modifier.testTag("sa_missing_key_hint")
                                 )
                             }
                         }
@@ -338,7 +364,10 @@ fun SaSettingsScreen(
 
                         AnimatedVisibility(visible = testResult != null) {
                             testResult?.let { result ->
-                                SaTestResultCard(result = result)
+                                UnifiedTestResultCard(
+                                    model = result.toUnifiedCardModel(),
+                                    cardTestTag = "sa_test_result_card"
+                                )
                             }
                         }
                     }
@@ -390,74 +419,4 @@ fun SaSettingsScreen(
     }
 }
 
-@Composable
-private fun SaTestResultCard(result: SaSettingsViewModel.TestResult) {
-    val containerColor = if (result.success) {
-        MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.55f)
-    } else {
-        MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.55f)
-    }
-    val contentTint = if (result.success) {
-        MaterialTheme.colorScheme.primary
-    } else {
-        MaterialTheme.colorScheme.error
-    }
 
-    Card(
-        modifier = Modifier
-            .fillMaxWidth()
-            .testTag("sa_test_result_card"),
-        colors = CardDefaults.cardColors(containerColor = containerColor)
-    ) {
-        Column(
-            modifier = Modifier.padding(14.dp),
-            verticalArrangement = Arrangement.spacedBy(8.dp)
-        ) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    Icon(
-                        imageVector = if (result.success) Icons.Filled.CheckCircle else Icons.Filled.Error,
-                        contentDescription = null,
-                        tint = contentTint
-                    )
-                    Text(
-                        text = if (result.success) "الاتصال ناجح" else "فشل الاتصال",
-                        style = MaterialTheme.typography.titleMedium,
-                        color = contentTint
-                    )
-                }
-                Text(
-                    text = "Code: ${result.statusCode} • ${result.durationMs} ms",
-                    style = MaterialTheme.typography.labelMedium,
-                    fontFamily = FontFamily.Monospace
-                )
-            }
-
-            val rawOutput = if (result.success) result.body else (result.error ?: "خطأ غير معروف")
-            val snippet = rawOutput.take(500)
-            if (snippet.isNotBlank()) {
-                Surface(
-                    color = MaterialTheme.colorScheme.surface.copy(alpha = 0.8f),
-                    shape = RoundedCornerShape(10.dp),
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    CompositionLocalProvider(LocalLayoutDirection provides LayoutDirection.Ltr) {
-                        Text(
-                            text = snippet,
-                            fontFamily = FontFamily.Monospace,
-                            style = MaterialTheme.typography.bodyMedium,
-                            modifier = Modifier.padding(10.dp)
-                        )
-                    }
-                }
-            }
-        }
-    }
-}

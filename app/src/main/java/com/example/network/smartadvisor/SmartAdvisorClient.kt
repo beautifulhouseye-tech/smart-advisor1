@@ -182,6 +182,16 @@ class SmartAdvisorClient internal constructor(
         if (url.isBlank()) {
             return unconfiguredFailure()
         }
+        if (!url.startsWith("https://", ignoreCase = true)) {
+            return HttpTransport.Result.Failure(
+                error = "يتطلب Smart Advisor استخدام رابط HTTPS مشفر لحماية مفتاح API.",
+                code = -1,
+                ms = 0L,
+                kind = HttpTransport.FailureKind.NON_RETRYABLE,
+                retryable = false
+            )
+        }
+        val headers = buildHeaders()
         val effectiveKey = idempotencyKey?.trim()?.takeIf { it.isNotEmpty() }
             ?: msg.notificationId.trim().takeIf {
                 it.isNotEmpty() && it != "smart-advisor-test" && !it.startsWith("queue-retry-")
@@ -189,7 +199,7 @@ class SmartAdvisorClient internal constructor(
         return transport.execute(
             url = url,
             method = "POST",
-            headers = buildHeaders(),
+            headers = headers,
             body = buildBody(msg, excludeProductIds),
             contentType = "JSON",
             maxAttempts = effectiveAttempts(),

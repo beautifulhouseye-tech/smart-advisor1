@@ -2,6 +2,7 @@ package com.example.ui.screens
 
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -19,6 +20,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
@@ -26,11 +28,9 @@ import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.HelpOutline
 import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.Add
-import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Cloud
 import androidx.compose.material.icons.filled.Code
 import androidx.compose.material.icons.filled.Delete
-import androidx.compose.material.icons.filled.Error
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material.icons.filled.Lock
@@ -80,6 +80,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
+import androidx.compose.ui.text.style.TextDirection
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.dp
@@ -90,6 +91,8 @@ import com.example.data.local.entity.GroupReplyMode
 import com.example.data.local.entity.HeaderItem
 import com.example.data.local.entity.RequestField
 import com.example.data.local.entity.WebhookMode
+import com.example.ui.components.BidiDisplayFormatter
+import com.example.ui.components.UnifiedTestResultCard
 import com.example.ui.viewmodel.ServerViewModel
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -520,21 +523,36 @@ fun ServerScreen(
                                     style = MaterialTheme.typography.titleMedium
                                 )
                             }
+                            val formattedPreview = remember(previewJson, config.contentType) {
+                                if (config.contentType.equals("JSON", ignoreCase = true)) {
+                                    BidiDisplayFormatter.formatJsonForDisplay(previewJson)
+                                } else {
+                                    BidiDisplayFormatter.formatCodeExcerptForLtr(previewJson.ifBlank { "{}" })
+                                }
+                            }
                             Surface(
                                 color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.55f),
                                 shape = RoundedCornerShape(12.dp),
                                 modifier = Modifier.fillMaxWidth()
                             ) {
                                 CompositionLocalProvider(LocalLayoutDirection provides LayoutDirection.Ltr) {
-                                    Text(
-                                        text = previewJson.ifBlank { "{}" },
-                                        fontFamily = FontFamily.Monospace,
-                                        style = MaterialTheme.typography.bodyMedium,
-                                        color = MaterialTheme.colorScheme.onSurface,
+                                    Box(
                                         modifier = Modifier
+                                            .fillMaxWidth()
+                                            .horizontalScroll(rememberScrollState())
                                             .padding(12.dp)
-                                            .testTag("server_preview_text")
-                                    )
+                                    ) {
+                                        Text(
+                                            text = formattedPreview,
+                                            style = MaterialTheme.typography.bodyMedium.copy(
+                                                fontFamily = FontFamily.Monospace,
+                                                textDirection = TextDirection.Ltr
+                                            ),
+                                            color = MaterialTheme.colorScheme.onSurface,
+                                            softWrap = false,
+                                            modifier = Modifier.testTag("server_preview_text")
+                                        )
+                                    }
                                 }
                             }
                         }
@@ -595,7 +613,10 @@ fun ServerScreen(
 
                         AnimatedVisibility(visible = testResult != null) {
                             testResult?.let { result ->
-                                TestResultCard(result = result)
+                                UnifiedTestResultCard(
+                                    model = result.toUnifiedCardModel(),
+                                    cardTestTag = "test_result_card"
+                                )
                             }
                         }
                     }
@@ -940,81 +961,6 @@ private fun RequestFieldCard(
     }
 }
 
-@Composable
-private fun TestResultCard(result: ServerViewModel.TestResult) {
-    val containerColor = if (result.success) {
-        MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.55f)
-    } else {
-        MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.55f)
-    }
-    val contentTint = if (result.success) {
-        MaterialTheme.colorScheme.primary
-    } else {
-        MaterialTheme.colorScheme.error
-    }
-
-    Card(
-        modifier = Modifier
-            .fillMaxWidth()
-            .testTag("test_result_card"),
-        colors = CardDefaults.cardColors(containerColor = containerColor)
-    ) {
-        Column(
-            modifier = Modifier.padding(14.dp),
-            verticalArrangement = Arrangement.spacedBy(8.dp)
-        ) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    Icon(
-                        imageVector = if (result.success) Icons.Filled.CheckCircle else Icons.Filled.Error,
-                        contentDescription = null,
-                        tint = contentTint
-                    )
-                    Text(
-                        text = if (result.success) {
-                            if (result.isToolPreview) "نجحت معاينة أداة AI" else "نجح الاختبار"
-                        } else {
-                            "فشل الطلب"
-                        },
-                        style = MaterialTheme.typography.titleMedium,
-                        color = contentTint
-                    )
-                }
-                Text(
-                    text = "Code: ${result.statusCode} • ${result.durationMs} ms",
-                    style = MaterialTheme.typography.labelMedium,
-                    fontFamily = FontFamily.Monospace
-                )
-            }
-
-            val rawOutput = if (result.success) result.body else (result.error ?: "خطأ غير معروف")
-            val snippet = rawOutput.take(500)
-            if (snippet.isNotBlank()) {
-                Surface(
-                    color = MaterialTheme.colorScheme.surface.copy(alpha = 0.8f),
-                    shape = RoundedCornerShape(10.dp),
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    CompositionLocalProvider(LocalLayoutDirection provides LayoutDirection.Ltr) {
-                        Text(
-                            text = snippet,
-                            fontFamily = FontFamily.Monospace,
-                            style = MaterialTheme.typography.bodyMedium,
-                            modifier = Modifier.padding(10.dp)
-                        )
-                    }
-                }
-            }
-        }
-    }
-}
 
 @Composable
 private fun HowItWorksCard() {

@@ -13,8 +13,11 @@ import com.example.data.security.SmartAdvisorPrefs
 import com.example.engine.IncomingMessage
 import com.example.engine.VariableEngine
 import com.example.network.HttpTransport
+import com.example.network.ResponseOutcomeAnalyzer.AnalyzedOutcome
+import com.example.network.ResponseOutcomeAnalyzer.ResponseStatus
 import com.example.network.WebhookClient
 import com.example.network.security.SecretVault
+import com.example.ui.components.UnifiedTestResultCardModel
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -56,8 +59,37 @@ class ServerViewModel @Inject constructor(
         val body: String,
         val error: String?,
         val durationMs: Long,
-        val isToolPreview: Boolean = false
-    )
+        val isToolPreview: Boolean = false,
+        val outcomeStatus: ResponseStatus = if (success) ResponseStatus.SUCCESS else ResponseStatus.FAILURE,
+        val title: String = if (success) {
+            if (isToolPreview) "نجحت معاينة أداة AI" else "نجح الاختبار"
+        } else {
+            "فشل الطلب"
+        },
+        val serverMessage: String = if (success) body else (error ?: "خطأ غير معروف"),
+        val sourceLabel: String = "",
+        val trustLabel: String = "",
+        val extractedText: String = "",
+        val reasonSummary: String = "",
+        val guidance: String = "",
+        val rawSnippet: String = "",
+        val truncated: Boolean = false
+    ) {
+        fun toUnifiedCardModel(): UnifiedTestResultCardModel = UnifiedTestResultCardModel(
+            status = outcomeStatus,
+            title = title,
+            statusCode = statusCode,
+            durationMs = durationMs,
+            serverMessage = serverMessage,
+            sourceLabel = sourceLabel,
+            trustLabel = trustLabel,
+            extractedText = extractedText,
+            reasonSummary = reasonSummary,
+            guidance = guidance,
+            rawSnippet = rawSnippet,
+            truncated = truncated
+        )
+    }
 
     private val _testResult = MutableStateFlow<TestResult?>(null)
     val testResult: StateFlow<TestResult?> = _testResult.asStateFlow()
@@ -320,33 +352,25 @@ class ServerViewModel @Inject constructor(
 
         viewModelScope.launch {
             val sampleMsg = sampleIncomingMessage()
-            val result = webhookClient.send(current, sampleMsg)
-            _testResult.value = when (result) {
-                is HttpTransport.Result.Success -> TestResult(
-                    success = true,
-                    statusCode = result.code,
-                    body = vault.redact(result.body),
-                    error = null,
-                    durationMs = result.ms,
-                    isToolPreview = false
-                )
-                is HttpTransport.Result.Conflict -> TestResult(
-                    success = false,
-                    statusCode = result.code,
-                    body = vault.redact(result.body),
-                    error = "تعارض من الخادم (HTTP 409)",
-                    durationMs = result.ms,
-                    isToolPreview = false
-                )
-                is HttpTransport.Result.Failure -> TestResult(
-                    success = false,
-                    statusCode = result.code,
-                    body = "",
-                    error = vault.redact(result.error),
-                    durationMs = result.ms,
-                    isToolPreview = false
-                )
-            }
+            val analyzed: AnalyzedOutcome = webhookClient.testWebhook(current, sampleMsg)
+            _testResult.value = TestResult(
+                success = analyzed.isSuccess,
+                statusCode = analyzed.statusCode,
+                body = analyzed.rawExcerpt.ifBlank { analyzed.serverMessage },
+                error = if (analyzed.isSuccess) null else analyzed.serverMessage,
+                durationMs = analyzed.latencyMs,
+                isToolPreview = false,
+                outcomeStatus = analyzed.status,
+                title = analyzed.title,
+                serverMessage = analyzed.serverMessage,
+                sourceLabel = analyzed.sourceLabel,
+                trustLabel = analyzed.trustLabel,
+                extractedText = analyzed.extractedText,
+                reasonSummary = analyzed.reasonSummary,
+                guidance = analyzed.guidance,
+                rawSnippet = analyzed.rawExcerpt,
+                truncated = analyzed.truncated
+            )
             _isTesting.value = false
         }
     }
@@ -365,12 +389,19 @@ class ServerViewModel @Inject constructor(
                 aiQuery = aiQuery,
                 reason = "اختبار نتيجة أداة AI"
             )
+            val trustArabic = if (toolRes.trustLevel == WebhookClient.TRUST_SMART_ADVISOR_AUTH) {
+                "Smart Advisor عبر HTTPS"
+            } else {
+                "خارجي غير متحقق منه"
+            }
             val displayText = buildString {
-                append("المصدر: ${toolRes.sourceLabel} (درجة الثقة: خارجي غير متحقق منه)\n")
+                append("المصدر: ${toolRes.sourceLabel} (درجة الثقة: $trustArabic)\n")
                 if (toolRes.extractedText.isNotBlank()) {
                     append("النص المستخرج للـ AI:\n").append(toolRes.extractedText)
                 } else if (toolRes.rawExcerpt.isNotBlank()) {
                     append("مقتطف الاستجابة المنقّح:\n").append(toolRes.rawExcerpt)
+                } else if (toolRes.serverMessage.isNotBlank()) {
+                    append(toolRes.serverMessage)
                 }
                 if (toolRes.truncated) {
                     append("\n[تم اقتطاع الاستجابة للحد الأقصى المسموح]")
@@ -383,7 +414,21 @@ class ServerViewModel @Inject constructor(
                 body = displayText,
                 error = toolRes.redactedError,
                 durationMs = toolRes.latencyMs,
-                isToolPreview = true
+                isToolPreview = true,
+                outcomeStatus = toolRes.outcomeStatus,
+                title = toolRes.title.ifBlank {
+                    if (toolRes.ok) "نجحت معاينة أداة AI" else "فشل اختبار الأداة"
+                },
+                serverMessage = toolRes.serverMessage.ifBlank {
+                    toolRes.redactedError ?: toolRes.extractedText
+                },
+                sourceLabel = toolRes.sourceLabel,
+                trustLabel = trustArabic,
+                extractedText = toolRes.extractedText,
+                reasonSummary = toolRes.reasonSummary,
+                guidance = toolRes.guidance,
+                rawSnippet = toolRes.rawExcerpt,
+                truncated = toolRes.truncated
             )
             _isTesting.value = false
         }

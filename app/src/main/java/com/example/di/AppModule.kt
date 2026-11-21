@@ -119,8 +119,9 @@ object AppModule {
     @Singleton
     fun provideWebhookClient(
         transport: HttpTransport,
-        vault: SecretVault
-    ): WebhookClient = WebhookClient(transport, vault)
+        vault: SecretVault,
+        smartAdvisorPrefs: com.example.data.security.SmartAdvisorPrefs
+    ): WebhookClient = WebhookClient(transport, vault, smartAdvisorPrefs)
 
     @Provides
     @Singleton

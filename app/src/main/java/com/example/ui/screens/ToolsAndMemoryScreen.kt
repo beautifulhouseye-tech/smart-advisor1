@@ -1,6 +1,7 @@
 package com.example.ui.screens
 
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -18,6 +19,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -65,6 +67,7 @@ import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextDirection
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.dp
@@ -240,17 +243,25 @@ fun ToolsAndMemoryScreen(
                                     modifier = Modifier.fillMaxWidth()
                                 ) {
                                     CompositionLocalProvider(LocalLayoutDirection provides LayoutDirection.Ltr) {
-                                        Text(
-                                            text = saBaseUrl.ifBlank { SmartAdvisorPrefs.DEFAULT_BASE_URL },
-                                            fontFamily = FontFamily.Monospace,
-                                            style = MaterialTheme.typography.bodySmall,
-                                            color = MaterialTheme.colorScheme.onSurface,
-                                            maxLines = 2,
-                                            overflow = TextOverflow.Ellipsis,
+                                        Box(
                                             modifier = Modifier
-                                                .padding(horizontal = 12.dp, vertical = 10.dp)
-                                                .testTag("tools_default_endpoint_text")
-                                        )
+                                                .fillMaxWidth()
+                                                .horizontalScroll(rememberScrollState())
+                                        ) {
+                                            Text(
+                                                text = saBaseUrl.ifBlank { SmartAdvisorPrefs.DEFAULT_BASE_URL },
+                                                style = MaterialTheme.typography.bodySmall.copy(
+                                                    fontFamily = FontFamily.Monospace,
+                                                    textDirection = TextDirection.Ltr
+                                                ),
+                                                color = MaterialTheme.colorScheme.onSurface,
+                                                maxLines = 1,
+                                                softWrap = false,
+                                                modifier = Modifier
+                                                    .padding(horizontal = 12.dp, vertical = 10.dp)
+                                                    .testTag("tools_default_endpoint_text")
+                                            )
+                                        }
                                     }
                                 }
 

@@ -105,15 +105,26 @@ open class HttpTransport(
             DEFAULT_TIMEOUT_SECONDS
         }
 
-        val requestClient = client.newBuilder()
-            .callTimeout(effectiveTimeoutSeconds.toLong(), TimeUnit.SECONDS)
-            .build()
-
         val finalHeaders = LinkedHashMap(headers)
         val trimmedIdemKey = idempotencyKey?.trim().orEmpty()
         if (trimmedIdemKey.isNotEmpty() && !finalHeaders.keys.any { it.equals(HEADER_IDEMPOTENCY_KEY, ignoreCase = true) }) {
             finalHeaders[HEADER_IDEMPOTENCY_KEY] = trimmedIdemKey
         }
+
+        val hasSensitiveAuthHeader = finalHeaders.keys.any { key ->
+            key.equals("X-SA-API-Key", ignoreCase = true) ||
+                key.equals("Authorization", ignoreCase = true)
+        }
+
+        val requestClient = client.newBuilder()
+            .callTimeout(effectiveTimeoutSeconds.toLong(), TimeUnit.SECONDS)
+            .apply {
+                if (hasSensitiveAuthHeader) {
+                    followRedirects(false)
+                    followSslRedirects(false)
+                }
+            }
+            .build()
 
         val requestBody = buildRequestBody(normalizedMethod, body, contentType)
         val request = try {
@@ -165,6 +176,28 @@ open class HttpTransport(
                             body = responseBody,
                             code = response.code,
                             ms = elapsedMs,
+                            headers = responseHeaders,
+                            idempotencySupported = hostSupportsIdempotency,
+                            idempotencyReplayed = headerReplayed
+                        )
+                    }
+
+                    if (hasSensitiveAuthHeader && response.code in 300..399) {
+                        val locationHeader = response.header("Location").orEmpty()
+                        val targetRedirect = locationHeader.takeIf { it.isNotBlank() }?.let { request.url.resolve(it) }
+                        val redirectDetail = when {
+                            targetRedirect == null -> "رفض إعادة التوجيه لحماية مفتاح المصادقة."
+                            !targetRedirect.isHttps -> "تم حظر إعادة التوجيه إلى اتصال غير مشفر (HTTP) لحماية مفتاح المصادقة."
+                            !targetRedirect.host.equals(host, ignoreCase = true) ->
+                                "تم حظر إعادة التوجيه إلى نطاق آخر (${targetRedirect.host}) لمنع تسريب مفتاح المصادقة."
+                            else -> "أعاد الخادم إعادة توجيه (${response.code}) لمسار يتطلب مصادقة."
+                        }
+                        return@withContext Result.Failure(
+                            error = redirectDetail,
+                            code = response.code,
+                            ms = elapsedMs,
+                            kind = FailureKind.NON_RETRYABLE,
+                            retryable = false,
                             headers = responseHeaders,
                             idempotencySupported = hostSupportsIdempotency,
                             idempotencyReplayed = headerReplayed
