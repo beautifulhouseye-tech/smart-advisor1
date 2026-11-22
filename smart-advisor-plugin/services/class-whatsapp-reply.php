@@ -44,30 +44,77 @@ class SA_WhatsApp_Reply {
      */
     public static function permission( $request ) {
         self::reset_request_cache();
+        $trace_id = class_exists( 'SA_Diagnostic_Logger' ) ? SA_Diagnostic_Logger::extract_trace_id( $request ) : '';
         $config = self::get_config();
         if ( empty( $config['enabled'] ) ) {
+            self::log_auth_diag( $trace_id, '/wp-json/smart-advisor/v1/whatsapp/reply', 403, 'AUTH_REJECTED', 'sa_wa_disabled', 'الخدمة معطلة.' );
             return new WP_Error( 'sa_wa_disabled', 'الخدمة معطلة.', [ 'status' => 403 ] );
         }
         if ( class_exists( 'SA_Customer_Service_Settings' ) ) {
             $service_config = SA_Customer_Service_Settings::get_config();
             if ( empty( $service_config['enabled'] ) ) {
+                self::log_auth_diag( $trace_id, '/wp-json/smart-advisor/v1/whatsapp/reply', 403, 'AUTH_REJECTED', 'sa_customer_service_disabled', 'المساعد وخدمة العملاء معطلان حالياً.' );
                 return new WP_Error( 'sa_customer_service_disabled', 'المساعد وخدمة العملاء معطلان حالياً.', [ 'status' => 403 ] );
             }
         }
 
         $provided = method_exists( $request, 'get_header' ) ? $request->get_header( 'X-SA-API-Key' ) : '';
-        if ( empty( $provided ) || ! is_string( $provided ) ) {
-            return new WP_Error( 'sa_missing_key', 'مفتاح API مطلوب.', [ 'status' => 401 ] );
+        $provided = is_string( $provided ) ? trim( $provided ) : '';
+        if ( '' === $provided ) {
+            self::log_auth_diag( $trace_id, '/wp-json/smart-advisor/v1/whatsapp/reply', 401, 'AUTH_REJECTED', 'sa_missing_key', 'مفتاح API مطلوب في ترويسة X-SA-API-Key.' );
+            return new WP_Error( 'sa_missing_key', 'مفتاح API مطلوب في ترويسة X-SA-API-Key.', [ 'status' => 401 ] );
         }
 
-        $stored = (string) get_option( self::OPTION_KEY_HASH, '' );
-        $secret = defined( 'AUTH_KEY' ) ? AUTH_KEY : ( function_exists( 'wp_salt' ) ? wp_salt( 'auth' ) : 'sa_auth_salt' );
+        $stored = trim( (string) get_option( self::OPTION_KEY_HASH, '' ) );
+        if ( '' === $stored ) {
+            self::log_auth_diag( $trace_id, '/wp-json/smart-advisor/v1/whatsapp/reply', 503, 'KEY_NOT_CONFIGURED', 'sa_key_not_configured', 'مفتاح API غير مضبوط في إعدادات الإضافة على الخادم.' );
+            return new WP_Error( 'sa_key_not_configured', 'مفتاح API غير مضبوط في إعدادات الإضافة على الخادم. يرجى توليد مفتاح أمان من لوحة تحكم WordPress.', [ 'status' => 503 ] );
+        }
 
-        if ( '' === $stored || ! hash_equals( $stored, hash_hmac( 'sha256', $provided, $secret ) ) ) {
+        $secret = defined( 'AUTH_KEY' ) ? AUTH_KEY : ( function_exists( 'wp_salt' ) ? wp_salt( 'auth' ) : 'sa_auth_salt' );
+        if ( ! hash_equals( $stored, hash_hmac( 'sha256', $provided, $secret ) ) ) {
+            self::log_auth_diag( $trace_id, '/wp-json/smart-advisor/v1/whatsapp/reply', 403, 'AUTH_REJECTED', 'sa_bad_key', 'مفتاح API غير صحيح.' );
             return new WP_Error( 'sa_bad_key', 'مفتاح API غير صحيح.', [ 'status' => 403 ] );
         }
 
         return true;
+    }
+
+    private static function log_auth_diag( $trace_id, $path, $http_status, $auth_state, $error_code, $desc ) {
+        if ( class_exists( 'SA_Diagnostic_Logger' ) ) {
+            SA_Diagnostic_Logger::log_event( [
+                'trace_id'          => $trace_id,
+                'operation'         => 'wp_auth_check',
+                'method'            => 'POST',
+                'path'              => $path,
+                'http_status'       => (int) $http_status,
+                'auth_state'        => $auth_state,
+                'stage'             => 'auth_verified',
+                'error_code'        => $error_code,
+                'short_description' => $desc,
+                'outcome'           => 'FAILURE',
+                'steps'             => [ 'wp_received', 'auth_rejected' ],
+            ] );
+        }
+    }
+
+    private static function build_diag_trace( $trace_id, $stage, array $steps, $error_code = '', $memory_status = '', $duplicate = false, $empty_reply = false ) {
+        $gem = class_exists( 'Core_Gemini' ) && method_exists( 'Core_Gemini', 'get_last_trace' )
+            ? Core_Gemini::get_last_trace()
+            : [ 'engine' => '', 'fallback_triggered' => false, 'error_code' => '', 'steps' => [] ];
+        $merged_steps = array_values( array_unique( array_merge( $steps, (array) ( $gem['steps'] ?? [] ) ) ) );
+        return [
+            'trace_id'           => (string) $trace_id,
+            'auth_status'        => 'accepted',
+            'stage'              => (string) $stage,
+            'engine'             => (string) ( $gem['engine'] ?? '' ),
+            'fallback_triggered' => ! empty( $gem['fallback_triggered'] ),
+            'error_code'         => (string) ( '' !== $error_code ? $error_code : ( $gem['error_code'] ?? '' ) ),
+            'memory_status'      => (string) $memory_status,
+            'duplicate_blocked'  => (bool) $duplicate,
+            'empty_reply'        => (bool) $empty_reply,
+            'steps'              => $merged_steps,
+        ];
     }
 
     /**
@@ -172,16 +219,44 @@ class SA_WhatsApp_Reply {
     }
 
     public static function handle( $request ) {
+        $trace_id = class_exists( 'SA_Diagnostic_Logger' ) ? SA_Diagnostic_Logger::extract_trace_id( $request ) : '';
+        $trace_steps = [ 'wp_received', 'auth_verified' ];
+        $trace_stage = 'wp_received';
+        $memory_status = '';
+
         $config  = self::get_config();
         $message = $request->get_param( 'message' );
         $sender  = $request->get_param( 'sender' );
 
         if ( ! is_string( $sender ) || trim( $sender ) === '' ) {
-            return self::build_rest_response( [ 'reply' => 'خطأ: لم يتم التعرف على رقم المرسل.' ], 400 );
+            if ( class_exists( 'SA_Diagnostic_Logger' ) ) {
+                SA_Diagnostic_Logger::log_event( [
+                    'trace_id'          => $trace_id,
+                    'operation'         => 'wp_whatsapp_reply',
+                    'method'            => 'POST',
+                    'path'              => '/wp-json/smart-advisor/v1/whatsapp/reply',
+                    'http_status'       => 400,
+                    'auth_state'        => 'SERVER_ACCEPTED',
+                    'stage'             => 'wp_received',
+                    'error_code'        => 'sa_missing_sender',
+                    'short_description' => 'لم يتم التعرف على معرف المرسل',
+                    'outcome'           => 'FAILURE',
+                    'steps'             => $trace_steps,
+                ] );
+            }
+            return self::build_rest_response( [
+                'reply'            => 'خطأ: لم يتم التعرف على رقم المرسل.',
+                'auth_status'      => 'accepted',
+                'diagnostic_trace' => self::build_diag_trace( $trace_id, 'wp_received', $trace_steps, 'sa_missing_sender' ),
+            ], 400 );
         }
         $sender = preg_replace( '/[^\p{L}\p{N}_+@.\-]/u', '', trim( $sender ) );
         if ( '' === $sender || strlen( $sender ) > 128 ) {
-            return self::build_rest_response( [ 'reply' => 'تعذر التحقق من هوية المرسل.' ], 400 );
+            return self::build_rest_response( [
+                'reply'            => 'تعذر التحقق من هوية المرسل.',
+                'auth_status'      => 'accepted',
+                'diagnostic_trace' => self::build_diag_trace( $trace_id, 'wp_received', $trace_steps, 'sa_invalid_sender' ),
+            ], 400 );
         }
 
         if ( ! is_string( $message ) || trim( $message ) === '' ) {
@@ -198,15 +273,36 @@ class SA_WhatsApp_Reply {
             ?: ( method_exists( $request, 'get_header' ) ? $request->get_header( 'X-SA-Delivery-Status' ) : '' )
         ) ) );
         if ( 'DELIVERY_UNKNOWN' === $delivery_status ) {
+            $trace_steps[] = 'delivery_unknown_guard';
+            if ( class_exists( 'SA_Diagnostic_Logger' ) ) {
+                SA_Diagnostic_Logger::log_event( [
+                    'trace_id'          => $trace_id,
+                    'operation'         => 'wp_whatsapp_reply',
+                    'method'            => 'POST',
+                    'path'              => '/wp-json/smart-advisor/v1/whatsapp/reply',
+                    'http_status'       => 200,
+                    'auth_state'        => 'SERVER_ACCEPTED',
+                    'stage'             => 'wp_received',
+                    'error_code'        => 'delivery_unknown_guard',
+                    'short_description' => 'تم منع إعادة المعالجة لوجود حالة DELIVERY_UNKNOWN',
+                    'outcome'           => 'UNKNOWN',
+                    'anomalies'         => [ 'DUPLICATE_MESSAGE_OR_REPLY' ],
+                    'steps'             => $trace_steps,
+                ] );
+            }
             return self::build_rest_response( [
-                'reply'           => '',
-                'intent'          => 'DELIVERY_UNKNOWN',
-                'status'          => 'DELIVERY_UNKNOWN',
-                'skip_resend'     => true,
-                'delivery_unknown'=> true,
-                'context_updated' => false,
+                'reply'            => '',
+                'intent'           => 'DELIVERY_UNKNOWN',
+                'status'           => 'DELIVERY_UNKNOWN',
+                'skip_resend'      => true,
+                'delivery_unknown' => true,
+                'context_updated'  => false,
+                'auth_status'      => 'accepted',
+                'diagnostic_trace' => self::build_diag_trace( $trace_id, 'wp_received', $trace_steps, 'delivery_unknown_guard', '', true, true ),
             ], 200 );
         }
+
+        $orchestrator_mode = self::is_orchestrator_mode( $request );
 
         // === CENTRAL INBOX IDEMPOTENCY ===
         $identity = class_exists( 'SA_WhatsApp_Inbox' )
@@ -228,19 +324,58 @@ class SA_WhatsApp_Reply {
         if ( '' !== $inbox_key && class_exists( 'SA_WhatsApp_Inbox' ) ) {
             $acq = SA_WhatsApp_Inbox::acquire( $identity['provider'], $inbox_key, $identity['sender_hash'] );
             if ( 'replay' === $acq['outcome'] || 'failed_permanent' === $acq['outcome'] ) {
+                $trace_steps[] = 'duplicate_replayed';
+                if ( class_exists( 'SA_Diagnostic_Logger' ) ) {
+                    SA_Diagnostic_Logger::log_event( [
+                        'trace_id'          => $trace_id,
+                        'operation'         => 'wp_whatsapp_reply',
+                        'method'            => 'POST',
+                        'path'              => '/wp-json/smart-advisor/v1/whatsapp/reply',
+                        'http_status'       => 200,
+                        'auth_state'        => 'SERVER_ACCEPTED',
+                        'stage'             => 'wp_received',
+                        'error_code'        => 'idempotency_replay',
+                        'short_description' => 'تم التقاط رسالة مكررة وإرجاع الرد المخزن دون إعادة توليد',
+                        'outcome'           => 'UNKNOWN',
+                        'anomalies'         => [ 'DUPLICATE_MESSAGE_OR_REPLY' ],
+                        'steps'             => $trace_steps,
+                    ] );
+                }
                 return SA_WhatsApp_Inbox::replay_response_from_row( $acq['row'] );
             }
             if ( 'in_flight' === $acq['outcome'] ) {
+                $trace_steps[] = 'in_flight_conflict';
                 return self::build_rest_response(
-                    [ 'error' => 'الرسالة قيد المعالجة حالياً.', 'status' => 'processing' ],
+                    [
+                        'ok'               => false,
+                        'error'            => 'الرسالة قيد المعالجة حالياً.',
+                        'error_code'       => 'sa_in_flight',
+                        'status'           => 'processing',
+                        'auth_status'      => 'accepted',
+                        'diagnostic_trace' => self::build_diag_trace( $trace_id, 'wp_received', $trace_steps, 'sa_in_flight', '', true, true ),
+                    ],
                     409,
                     false,
                     [ 'Retry-After' => (int) ( $acq['retry_after'] ?? 5 ) ]
                 );
             }
             if ( 'db_error' === $acq['outcome'] ) {
+                $db_err_msg = 'الخدمة غير متاحة مؤقتاً.';
+                $db_err_payload = [
+                    'ok'               => false,
+                    'status'           => 'error',
+                    'error_code'       => 'sa_inbox_unavailable',
+                    'error'            => $db_err_msg,
+                    'reply'            => $orchestrator_mode ? '' : $db_err_msg,
+                    'auth_status'      => 'accepted',
+                    'diagnostic_trace' => self::build_diag_trace( $trace_id, 'wp_received', $trace_steps, 'sa_inbox_unavailable', '', false, false ),
+                ];
+                if ( $orchestrator_mode ) {
+                    $db_err_payload['suggested_reply']                = $db_err_msg;
+                    $db_err_payload['reply_deferred_to_orchestrator'] = true;
+                }
                 return self::build_rest_response(
-                    [ 'reply' => 'الخدمة غير متاحة مؤقتاً.', 'error' => 'inbox_unavailable' ],
+                    $db_err_payload,
                     503,
                     false,
                     [ 'Retry-After' => 10 ]
@@ -254,16 +389,74 @@ class SA_WhatsApp_Reply {
 
         $missing_id_header = $identity['has_message_id'] ? [] : [ 'X-SA-Message-Id-Status' => 'missing' ];
 
-        $finish_complete = function( $payload, $status = 200 ) use ( &$lock_closed, $lock_id, $owner_token, $missing_id_header ) {
+        $finish_complete = function( $payload, $status = 200 ) use ( &$lock_closed, $lock_id, $owner_token, $missing_id_header, $trace_id, &$trace_stage, &$trace_steps, &$memory_status, $orchestrator_mode ) {
             $lock_closed = true;
+            $trace_steps[] = 'reply_composed';
+            $trace_steps[] = 'response_sent';
+            $trace_stage = 'reply_composed';
+            $reply_text = $orchestrator_mode ? (string) ( $payload['suggested_reply'] ?? $payload['reply'] ?? '' ) : (string) ( $payload['reply'] ?? '' );
+            $is_empty = '' === trim( $reply_text ) && empty( $payload['products'] );
+            $err_code = (string) ( $payload['error_code'] ?? '' );
+            $payload['auth_status'] = 'accepted';
+            $payload['diagnostic_trace'] = self::build_diag_trace( $trace_id, $trace_stage, $trace_steps, $err_code, $memory_status, false, $is_empty );
+            if ( class_exists( 'SA_Diagnostic_Logger' ) ) {
+                $ok_flag = isset( $payload['ok'] ) ? (bool) $payload['ok'] : true;
+                $anomalies = [];
+                if ( ! $ok_flag && 200 === (int) $status ) {
+                    $anomalies[] = 'HTTP_200_LOGICAL_FAILURE';
+                }
+                if ( $is_empty && $ok_flag ) {
+                    $anomalies[] = 'EMPTY_REPLY';
+                }
+                if ( 'failed' === $memory_status ) {
+                    $anomalies[] = 'MEMORY_RETRIEVAL_FAILED';
+                }
+                SA_Diagnostic_Logger::log_event( [
+                    'trace_id'           => $trace_id,
+                    'operation'          => 'wp_whatsapp_reply',
+                    'method'             => 'POST',
+                    'path'               => '/wp-json/smart-advisor/v1/whatsapp/reply',
+                    'http_status'        => (int) $status,
+                    'auth_state'         => 'SERVER_ACCEPTED',
+                    'stage'              => $trace_stage,
+                    'error_code'         => $payload['diagnostic_trace']['error_code'],
+                    'short_description'  => $ok_flag ? 'تمت معالجة الطلب وإرجاع الرد بنجاح' : (string) ( $payload['error'] ?? 'فشل منطقي في معالجة الرد' ),
+                    'engine'             => $payload['diagnostic_trace']['engine'],
+                    'fallback_triggered' => $payload['diagnostic_trace']['fallback_triggered'],
+                    'outcome'            => $ok_flag ? ( $is_empty ? 'UNKNOWN' : 'SUCCESS' ) : 'FAILURE',
+                    'anomalies'          => $anomalies,
+                    'steps'              => $payload['diagnostic_trace']['steps'],
+                ] );
+            }
             if ( $lock_id > 0 && '' !== $owner_token && class_exists( 'SA_WhatsApp_Inbox' ) ) {
                 SA_WhatsApp_Inbox::complete( $lock_id, $owner_token, $payload, $status );
             }
             return self::build_rest_response( $payload, $status, false, $missing_id_header );
         };
 
-        $finish_fail = function( $inbox_status, $error_msg, $payload, $http_status = 503, $extra_headers = [] ) use ( &$lock_closed, $lock_id, $owner_token, $missing_id_header ) {
+        $finish_fail = function( $inbox_status, $error_msg, $payload, $http_status = 503, $extra_headers = [] ) use ( &$lock_closed, $lock_id, $owner_token, $missing_id_header, $trace_id, &$trace_stage, &$trace_steps, &$memory_status ) {
             $lock_closed = true;
+            $trace_steps[] = 'response_error_sent';
+            $err_code = (string) ( $payload['error_code'] ?? '' );
+            $payload['auth_status'] = 'accepted';
+            $payload['diagnostic_trace'] = self::build_diag_trace( $trace_id, $trace_stage, $trace_steps, $err_code, $memory_status, false, false );
+            if ( class_exists( 'SA_Diagnostic_Logger' ) ) {
+                SA_Diagnostic_Logger::log_event( [
+                    'trace_id'           => $trace_id,
+                    'operation'          => 'wp_whatsapp_reply',
+                    'method'             => 'POST',
+                    'path'               => '/wp-json/smart-advisor/v1/whatsapp/reply',
+                    'http_status'        => (int) $http_status,
+                    'auth_state'         => 'SERVER_ACCEPTED',
+                    'stage'              => $trace_stage,
+                    'error_code'         => $err_code ?: sanitize_key( (string) $error_msg ),
+                    'short_description'  => (string) ( $payload['error'] ?? $error_msg ),
+                    'engine'             => $payload['diagnostic_trace']['engine'],
+                    'fallback_triggered' => $payload['diagnostic_trace']['fallback_triggered'],
+                    'outcome'            => 'FAILURE',
+                    'steps'              => $payload['diagnostic_trace']['steps'],
+                ] );
+            }
             if ( $lock_id > 0 && '' !== $owner_token && class_exists( 'SA_WhatsApp_Inbox' ) ) {
                 SA_WhatsApp_Inbox::fail( $lock_id, $owner_token, $inbox_status, $error_msg, $payload, $http_status );
             }
@@ -284,17 +477,34 @@ class SA_WhatsApp_Reply {
             if ( is_wp_error( $rl ) ) {
                 $err_data = $rl->get_error_data();
                 $err_status = is_array( $err_data ) && ! empty( $err_data['status'] ) ? (int) $err_data['status'] : 503;
+                $rl_msg = $rl->get_error_message();
                 return $finish_fail(
                     'RETRYABLE',
-                    $rl->get_error_message(),
-                    [ 'error' => $rl->get_error_message() ],
+                    $rl_msg,
+                    [
+                        'ok'         => false,
+                        'status'     => 'error',
+                        'error_code' => $rl->get_error_code(),
+                        'error'      => $rl_msg,
+                    ],
                     $err_status,
                     [ 'Retry-After' => 60 ]
                 );
             }
 
             if ( ! class_exists( 'Service_Conversation_Analyzer' ) ) {
-                $err_payload = [ 'reply' => self::format_for_whatsapp( self::render_template( 'service_error', [], 'الخدمة غير متاحة حالياً.' ) ) ];
+                $err_reply = self::format_for_whatsapp( self::render_template( 'service_error', [], 'الخدمة غير متاحة حالياً.' ) );
+                $err_payload = [
+                    'ok'         => false,
+                    'status'     => 'error',
+                    'error_code' => 'sa_missing_analyzer',
+                    'error'      => $err_reply,
+                    'reply'      => $orchestrator_mode ? '' : $err_reply,
+                ];
+                if ( $orchestrator_mode ) {
+                    $err_payload['suggested_reply']                = $err_reply;
+                    $err_payload['reply_deferred_to_orchestrator'] = true;
+                }
                 return $finish_fail( 'RETRYABLE', 'missing_analyzer', $err_payload, 503, [ 'Retry-After' => 15 ] );
             }
 
@@ -424,6 +634,8 @@ class SA_WhatsApp_Reply {
             }
             // === END ADDRESS FAST-PATH ===
 
+            $trace_steps[] = 'context_memory_loaded';
+            $trace_stage = 'context_memory_loaded';
             $secret = function_exists( 'wp_salt' ) ? wp_salt( 'auth' ) : ( defined( 'AUTH_KEY' ) ? AUTH_KEY : 'sa_ctx_salt' );
             $cache_key = 'sa_wa_ctx_' . hash_hmac( 'sha256', $sender, $secret );
             $context = get_transient( $cache_key );
@@ -434,6 +646,7 @@ class SA_WhatsApp_Reply {
             $active_context = [];
 
             if ( is_array( $context ) && $config['memory_minutes'] > 0 ) {
+                $memory_status = 'loaded';
                 $history = is_array( $context['history'] ?? null ) ? $context['history'] : [];
                 $known_context = is_array( $context['known_context'] ?? null ) ? $context['known_context'] : [];
                 $conversation_state = is_array( $context['conversation_state'] ?? null ) ? $context['conversation_state'] : [];
@@ -445,9 +658,9 @@ class SA_WhatsApp_Reply {
                         $known_context = [ 'type' => $legacy_type, 'known' => $known_context ];
                     }
                 }
+            } else {
+                $memory_status = 'empty';
             }
-
-            $orchestrator_mode = self::is_orchestrator_mode( $request );
 
             // === CATEGORY INTENT & WOOCOMMERCE TAXONOMY LINK PIPELINE ===
             if ( class_exists( 'SA_Category_Intent_Service' ) && SA_Category_Intent_Service::is_available() ) {
@@ -500,6 +713,8 @@ class SA_WhatsApp_Reply {
 
                     $store_name = function_exists( 'get_bloginfo' ) ? sanitize_text_field( (string) get_bloginfo( 'name' ) ) : '';
                     $payload = [
+                        'ok'              => true,
+                        'status'          => 'ok',
                         'reply'           => $orchestrator_mode ? '' : $formatted_reply,
                         'store_name'      => $store_name,
                         'intent'          => $cat_result['intent'],
@@ -521,11 +736,24 @@ class SA_WhatsApp_Reply {
             }
             // === END CATEGORY INTENT PIPELINE ===
 
+            $trace_steps[] = 'intent_analyzed';
+            $trace_stage = 'intent_analyzed';
             $analysis = Service_Conversation_Analyzer::analyze( $message, $history, $known_context, $conversation_state );
 
             if ( ! empty( $analysis['error'] ) ) {
                 $err_reply = self::format_for_whatsapp( self::render_template( 'service_error', [], 'عذراً، أواجه ضغطاً في الخدمة حالياً. حاول مرة أخرى بعد قليل.' ) );
-                return $finish_fail( 'RETRYABLE', 'analyzer_temporary_error', [ 'reply' => $err_reply ], 503, [ 'Retry-After' => 10 ] );
+                $err_payload = [
+                    'ok'         => false,
+                    'status'     => 'error',
+                    'error_code' => 'sa_analyzer_temporary_error',
+                    'error'      => $err_reply,
+                    'reply'      => $orchestrator_mode ? '' : $err_reply,
+                ];
+                if ( $orchestrator_mode ) {
+                    $err_payload['suggested_reply']                = $err_reply;
+                    $err_payload['reply_deferred_to_orchestrator'] = true;
+                }
+                return $finish_fail( 'RETRYABLE', 'analyzer_temporary_error', $err_payload, 503, [ 'Retry-After' => 10 ] );
             }
 
             $action = $analysis['action'] ?? 'chitchat';
@@ -535,13 +763,33 @@ class SA_WhatsApp_Reply {
             $reply = '';
             $legacy_products = [];
             $legacy_intent = $action;
+            $legacy_ok = true;
+            $legacy_status = 'ok';
+            $legacy_error_code = '';
+            $legacy_error = '';
 
             if ( 'offers' === $action ) {
                 $legacy_intent = 'OFFERS';
                 if ( empty( $config['skills']['offers'] ) || ! self::global_skill_enabled( 'offers_discounts' ) ) {
                     $reply = self::render_template( 'offers_disabled', [], 'العروض والخصومات غير متاحة حالياً.' );
+                    $legacy_ok = false;
+                    $legacy_status = 'disabled';
+                    $legacy_error_code = 'sa_offers_disabled';
+                    $legacy_error = $reply;
                 } elseif ( ! function_exists( 'wc_get_products' ) ) {
                     $reply = 'تعذر الوصول إلى عروض المتجر حالياً.';
+                    $err_payload = [
+                        'ok'         => false,
+                        'status'     => 'error',
+                        'error_code' => 'sa_woocommerce_unavailable',
+                        'error'      => $reply,
+                        'reply'      => $orchestrator_mode ? '' : $reply,
+                    ];
+                    if ( $orchestrator_mode ) {
+                        $err_payload['suggested_reply']                = $reply;
+                        $err_payload['reply_deferred_to_orchestrator'] = true;
+                    }
+                    return $finish_fail( 'RETRYABLE', 'woocommerce_unavailable', $err_payload, 503, [ 'Retry-After' => 15 ] );
                 } else {
                     $sale_products = wc_get_products( [ 'status' => 'publish', 'limit' => 3, 'return' => 'objects', 'on_sale' => true, 'stock_status' => 'instock', 'orderby' => 'date', 'order' => 'DESC' ] );
                     $lines = [];
@@ -579,20 +827,47 @@ class SA_WhatsApp_Reply {
                 }
             } elseif ( 'chitchat' === $action || 'refuse' === $action ) {
                 if ( empty( $config['skills']['greeting'] ) ) {
-                    $reply = self::render_template( 'service_error', [], 'عذراً، لا أستطيع تنفيذ هذا الطلب.' );
-                } else {
-                    $reply = $analysis['reply_text'] ?: 'كيف يمكنني مساعدتك؟';
+                    $err_reply = self::format_for_whatsapp( self::render_template( 'service_error', [], 'عذراً، خدمة التحية غير متاحة حالياً.' ) );
+                    $err_payload = [
+                        'ok'         => false,
+                        'status'     => 'error',
+                        'error_code' => 'sa_greeting_skill_disabled',
+                        'error'      => $err_reply,
+                        'reply'      => $orchestrator_mode ? '' : $err_reply,
+                    ];
+                    if ( $orchestrator_mode ) {
+                        $err_payload['suggested_reply']                = $err_reply;
+                        $err_payload['reply_deferred_to_orchestrator'] = true;
+                    }
+                    return $finish_fail( 'RETRYABLE', 'greeting_skill_disabled', $err_payload, 503, [ 'Retry-After' => 15 ] );
                 }
-                if ( 'chitchat' === $action && ! empty( $config['skills']['greeting'] ) ) {
+                $reply = $analysis['reply_text'] ?: 'كيف يمكنني مساعدتك؟';
+                if ( 'chitchat' === $action ) {
                     $reply = self::render_template( 'welcome' ) . "\n" . $reply;
+                } else {
+                    $legacy_ok = false;
+                    $legacy_status = 'refused';
+                    $legacy_error_code = 'sa_request_refused';
+                    $legacy_error = $reply;
                 }
             } elseif ( 'ask' === $action ) {
                 $reply = $analysis['question_text'] ?: self::render_template( 'ask_clarification', [], 'هل يمكنك توضيح طلبك؟' );
             } else {
                 $legacy_intent = 'PRODUCT_SEARCH';
                 if ( empty( $config['skills']['product_search'] ) || ! self::global_skill_enabled( 'product_search' ) ) {
-                    $reply = self::render_template( 'search_disabled', [], 'البحث غير متاح حالياً.' );
-                    return $finish_complete( [ 'reply' => self::format_for_whatsapp( $reply ) ], 200 );
+                    $disabled_reply = self::format_for_whatsapp( self::render_template( 'search_disabled', [], 'البحث غير متاح حالياً.' ) );
+                    $disabled_payload = [
+                        'ok'         => false,
+                        'status'     => 'disabled',
+                        'error_code' => 'sa_search_disabled',
+                        'error'      => $disabled_reply,
+                        'reply'      => $orchestrator_mode ? '' : $disabled_reply,
+                    ];
+                    if ( $orchestrator_mode ) {
+                        $disabled_payload['suggested_reply']                = $disabled_reply;
+                        $disabled_payload['reply_deferred_to_orchestrator'] = true;
+                    }
+                    return $finish_complete( $disabled_payload, 200 );
                 }
 
                 $type  = $analysis['type'] ?? ( $known_context['type'] ?? null );
@@ -607,6 +882,10 @@ class SA_WhatsApp_Reply {
                     $reply = self::render_template( 'ask_clarification', [], 'ماذا تبحث عنه؟' );
                 } elseif ( ! class_exists( 'Service_Smart_Search' ) ) {
                     $reply = self::render_template( 'search_disabled', [], 'البحث غير متاح.' );
+                    $legacy_ok = false;
+                    $legacy_status = 'disabled';
+                    $legacy_error_code = 'sa_search_unavailable';
+                    $legacy_error = $reply;
                 } else {
                     $products = null === $type
                         ? Service_Smart_Search::find_by_name_contains( $known['name_contains'], 5, $known )
@@ -680,11 +959,19 @@ class SA_WhatsApp_Reply {
             $store_name = function_exists( 'get_bloginfo' ) ? sanitize_text_field( (string) get_bloginfo( 'name' ) ) : '';
             $final_reply = self::format_for_whatsapp( $reply );
             $final_payload = [
+                'ok'         => $legacy_ok,
+                'status'     => $legacy_status,
                 'reply'      => $orchestrator_mode ? '' : $final_reply,
                 'store_name' => $store_name,
                 'intent'     => $legacy_intent,
                 'products'   => $legacy_products,
             ];
+            if ( '' !== $legacy_error_code ) {
+                $final_payload['error_code'] = $legacy_error_code;
+            }
+            if ( '' !== $legacy_error ) {
+                $final_payload['error'] = self::format_for_whatsapp( $legacy_error );
+            }
             if ( $orchestrator_mode ) {
                 $final_payload['suggested_reply']                = $final_reply;
                 $final_payload['reply_deferred_to_orchestrator'] = true;
@@ -692,7 +979,19 @@ class SA_WhatsApp_Reply {
             return $finish_complete( $final_payload, 200 );
         } catch ( Throwable $e ) {
             error_log( '[Smart Advisor] WhatsApp reply error: ' . $e->getMessage() );
-            return $finish_fail( 'RETRYABLE', $e->getMessage(), [ 'reply' => 'حدث خطأ مؤقت أثناء معالجة الرسالة.' ], 503, [ 'Retry-After' => 10 ] );
+            $catch_reply = 'حدث خطأ مؤقت أثناء معالجة الرسالة.';
+            $catch_payload = [
+                'ok'         => false,
+                'status'     => 'error',
+                'error_code' => 'sa_internal_temporary_error',
+                'error'      => $catch_reply,
+                'reply'      => $orchestrator_mode ? '' : $catch_reply,
+            ];
+            if ( $orchestrator_mode ) {
+                $catch_payload['suggested_reply']                = $catch_reply;
+                $catch_payload['reply_deferred_to_orchestrator'] = true;
+            }
+            return $finish_fail( 'RETRYABLE', $e->getMessage(), $catch_payload, 503, [ 'Retry-After' => 10 ] );
         }
     }
 

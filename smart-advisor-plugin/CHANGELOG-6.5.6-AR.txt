@@ -1,0 +1,15 @@
+تحديث Smart Advisor — الإصدار 6.5.6
+===================================
+
+الملفات المعدّلة:
+1. smart-advisor.php:
+   - ترقية رقم الإصدار والثابت MBA_VERSION إلى 6.5.6.
+2. services/class-whatsapp-reply.php:
+   - تمييز غياب مفتاح API في الترويسة (`sa_missing_key` / HTTP 401) عن عدم ضبط مفتاح API في إعدادات الإضافة على الخادم (`sa_key_not_configured` / HTTP 503) وعن عدم تطابق المفتاح (`sa_bad_key` / HTTP 403) مع قصّ المسافات الزائدة (`trim`) ودون تسريب أي جزء من المفتاح.
+   - منع إرجاع HTTP 200 عند تعذّر الخدمة أو تعطيل مهارة التحية أثناء معالجة `chitchat`/`refuse`، وإرجاع HTTP 503 مع حقول مهيكلة واضحة (`ok: false`, `status: "error"`, `error_code`, `error`).
+   - إضافة `ok: false`, `status`, و`error_code` لجميع حالات الخطأ أو الرفض أو تعطيل المهارات (`sa_missing_analyzer`, `sa_analyzer_temporary_error`, `sa_greeting_skill_disabled`, `sa_offers_disabled`, `sa_search_disabled`, `sa_request_refused`, `sa_internal_temporary_error`) مع احترام وضع المنسّق `orchestrator_mode` لمنع الرد المزدوج.
+   - الحفاظ الكامل على التوافق الخلفي مع حقل `reply` وقفل منع التكرار `SA_WhatsApp_Inbox`.
+3. services/class-automate-integration.php:
+   - تحديث القيمة الاحتياطية لـ `MBA_VERSION` إلى 6.5.6.
+4. tests/test-6.5.6-auth-and-responses.php:
+   - إضافة اختبارات شاملة لمسارات المصادقة (401/503/403/200) واستجابات الخدمة المهيكلة ووضع `orchestrator_mode`.

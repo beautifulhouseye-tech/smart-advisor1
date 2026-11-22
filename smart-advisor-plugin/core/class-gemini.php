@@ -25,14 +25,54 @@ class Core_Gemini {
     const CB_THRESHOLD = 2;
     const CB_WINDOW    = 60;
 
+    private static $last_trace = [
+        'engine'             => '',
+        'fallback_triggered' => false,
+        'error_code'         => '',
+        'steps'              => [],
+    ];
+
+    public static function get_last_trace() {
+        return self::$last_trace;
+    }
+
+    private static function map_engine_label( $step ) {
+        switch ( $step ) {
+            case 'gateway': return 'NewAPI';
+            case 'ollama':  return 'Qwen 2.5:1.5b';
+            case 'gemini':  return 'Gemini';
+            default:        return (string) $step;
+        }
+    }
+
     public static function chat( $messages, $system_prompt, $enable_web_search = false ) {
         $provider = Core_Settings::get( 'provider', 'gateway' );
         $chain    = self::build_chain( $provider );
+        $steps    = [ 'engine_selected' ];
+        $fallback_triggered = false;
+        $primary_step = $chain[0] ?? 'gateway';
+        $last_error_code = '';
+        self::$last_trace = [
+            'engine'             => self::map_engine_label( $primary_step ),
+            'fallback_triggered' => false,
+            'error_code'         => '',
+            'steps'              => $steps,
+        ];
 
-        foreach ( $chain as $step ) {
+        foreach ( $chain as $idx => $step ) {
+            $engine_label = self::map_engine_label( $step );
+            if ( $idx > 0 ) {
+                $fallback_triggered = true;
+                $steps[] = ( 'ollama' === $step ) ? 'qwen_fallback_dispatched' : ( $step . '_fallback_dispatched' );
+            } else {
+                $steps[] = ( 'gateway' === $step ) ? 'newapi_dispatched' : ( $step . '_dispatched' );
+            }
+
             // Circuit breaker — skip if recently failed
             if ( self::is_circuit_open( $step ) ) {
                 self::throttled_log( $step . ' circuit open — skipping' );
+                $steps[] = $step . '_circuit_open';
+                $last_error_code = 'circuit_open';
                 continue;
             }
 
@@ -46,16 +86,65 @@ class Core_Gemini {
             // Success → reset circuit and return
             if ( is_string( $result ) && trim( $result ) !== '' ) {
                 self::reset_circuit( $step );
+                $steps[] = 'engine_response_received';
+                self::$last_trace = [
+                    'engine'             => $engine_label,
+                    'fallback_triggered' => $fallback_triggered,
+                    'error_code'         => $fallback_triggered ? $last_error_code : '',
+                    'steps'              => $steps,
+                ];
+                if ( $fallback_triggered && class_exists( 'SA_Diagnostic_Logger' ) ) {
+                    SA_Diagnostic_Logger::log_event( [
+                        'operation'          => 'wp_ai_engine',
+                        'method'             => 'INTERNAL',
+                        'path'               => 'Core_Gemini::chat',
+                        'http_status'        => 200,
+                        'auth_state'         => 'NONE',
+                        'stage'              => 'engine_response_received',
+                        'error_code'         => $last_error_code ?: 'primary_engine_failed',
+                        'short_description'  => 'فشل المحرك الأساسي وتم التحويل بنجاح إلى ' . $engine_label,
+                        'engine'             => $engine_label,
+                        'fallback_triggered' => true,
+                        'outcome'            => 'SUCCESS',
+                        'anomalies'          => [ 'PRIMARY_ENGINE_FAILED' ],
+                        'steps'              => $steps,
+                    ] );
+                }
                 return $result;
             }
 
             if ( is_wp_error( $result ) ) {
                 $code = $result->get_error_code();
+                $last_error_code = $code;
+                $steps[] = $step . '_failed_' . $code;
 
                 // Stop ONLY on auth failures or malformed requests (won't change
                 // by trying another provider).
                 if ( in_array( $code, [ 'auth_error', 'bad_request' ], true ) ) {
                     self::throttled_log( "{$step} failed ({$code}) — stopping chain" );
+                    self::$last_trace = [
+                        'engine'             => $engine_label,
+                        'fallback_triggered' => $fallback_triggered,
+                        'error_code'         => $code,
+                        'steps'              => $steps,
+                    ];
+                    if ( class_exists( 'SA_Diagnostic_Logger' ) ) {
+                        SA_Diagnostic_Logger::log_event( [
+                            'operation'          => 'wp_ai_engine',
+                            'method'             => 'INTERNAL',
+                            'path'               => 'Core_Gemini::chat',
+                            'http_status'        => ( 'auth_error' === $code ) ? 401 : 400,
+                            'auth_state'         => ( 'auth_error' === $code ) ? 'AUTH_REJECTED' : 'NONE',
+                            'stage'              => 'engine_selected',
+                            'error_code'         => $code,
+                            'short_description'  => $result->get_error_message(),
+                            'engine'             => $engine_label,
+                            'fallback_triggered' => $fallback_triggered,
+                            'outcome'            => 'FAILURE',
+                            'anomalies'          => [ 'gateway' === $step ? 'PRIMARY_ENGINE_FAILED' : 'FALLBACK_ENGINE_FAILED', 'FALLBACK_NOT_TRIGGERED' ],
+                            'steps'              => $steps,
+                        ] );
+                    }
                     return $result;
                 }
 
@@ -64,9 +153,35 @@ class Core_Gemini {
                 self::throttled_log( "{$step} failed ({$code}) — trying next" );
                 self::bump_circuit( $step );
             } else {
+                $last_error_code = 'empty_response';
+                $steps[] = $step . '_empty';
                 self::throttled_log( "{$step} returned empty — trying next" );
                 self::bump_circuit( $step );
             }
+        }
+
+        self::$last_trace = [
+            'engine'             => self::map_engine_label( end( $chain ) ?: $primary_step ),
+            'fallback_triggered' => $fallback_triggered,
+            'error_code'         => 'all_providers_failed',
+            'steps'              => $steps,
+        ];
+        if ( class_exists( 'SA_Diagnostic_Logger' ) ) {
+            SA_Diagnostic_Logger::log_event( [
+                'operation'          => 'wp_ai_engine',
+                'method'             => 'INTERNAL',
+                'path'               => 'Core_Gemini::chat',
+                'http_status'        => 503,
+                'auth_state'         => 'NONE',
+                'stage'              => $fallback_triggered ? 'qwen_fallback_dispatched' : 'newapi_dispatched',
+                'error_code'         => 'all_providers_failed',
+                'short_description'  => 'فشل المحرك الأساسي والاحتياطي في توليد الرد',
+                'engine'             => self::$last_trace['engine'],
+                'fallback_triggered' => $fallback_triggered,
+                'outcome'            => 'FAILURE',
+                'anomalies'          => $fallback_triggered ? [ 'PRIMARY_ENGINE_FAILED', 'FALLBACK_ENGINE_FAILED' ] : [ 'PRIMARY_ENGINE_FAILED' ],
+                'steps'              => $steps,
+            ] );
         }
 
         return new WP_Error(

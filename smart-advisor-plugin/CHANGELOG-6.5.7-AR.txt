@@ -1,0 +1,20 @@
+====================================================================
+سجل تحديثات Smart Advisor — الإصدار 6.5.7
+====================================================================
+
+التغييرات الرئيسية:
+1. إضافة نظام التشخيص وتسجيل الأخطاء (`SA_Diagnostic_Logger`):
+   - ملف `core/class-diagnostic-logger.php` مع قائمة حقول مسموحة صارمة (Allowlist).
+   - تخزين دائري مشروط بحد أقصى 100 حدث في الخيار `sa_diagnostic_events_v1` (autoload=no).
+   - تنقيح تلقائي لكافة الأسرار (`X-SA-API-Key`، `Authorization`، `Bearer`، `Cookie`، التوكنات) وبيانات PII (أرقام الهواتف، البريد الإلكتروني، محتوى المحادثات).
+   - صفحة إدارة داخل لوحة تحكم WordPress بعنوان «سجل التشخيص والأخطاء» تحت قائمة Smart Advisor (`manage_options`) مع فلاتر وتقرير JSON منقح وزر مسح محمي بـ Nonce.
+   - مسار REST إداري محمي (`/wp-json/smart-advisor/v1/diagnostics`) لصلاحية `is_user_logged_in() && current_user_can('manage_options')` فقط.
+
+2. تتبع محركات الذكاء الاصطناعي (`Core_Gemini`):
+   - تسجيل اختيار المحرك الأساسي (`NewAPI`)، حالات الفشل، والتحول للاحتياطي (`Qwen 2.5:1.5b` / `Gemini`).
+   - إتاحة `Core_Gemini::get_last_trace()` لربط مسار المحركات بتقرير التشخيص.
+
+3. تتبع مسار الرد والتكامل مع AutoMate AI (`SA_WhatsApp_Reply` و `SA_AutoMate_Integration`):
+   - قراءة ترويسة `X-SA-Trace-Id` وربطها بأحداث الخادم.
+   - تسجيل أخطاء المصادقة (`sa_missing_key` / `sa_bad_key` / `sa_key_not_configured`) بدون تسريب أي مفاتيح.
+   - إرجاع `auth_status: "accepted"` و `diagnostic_trace` غير سري في الاستجابات مع التوافق التام مع الإصدار 6.5.6.

@@ -122,11 +122,58 @@ class SA_AutoMate_Integration {
         return $resp;
     }
 
+    private static function attach_diag( $request, array $payload, $operation, $path, $stage, $http_status = 200, $memory_status = '', $duplicate = false ) {
+        $trace_id = class_exists( 'SA_Diagnostic_Logger' ) ? SA_Diagnostic_Logger::extract_trace_id( $request ) : '';
+        $err_code = (string) ( $payload['error_code'] ?? '' );
+        $steps = [ 'wp_received', 'auth_verified', $stage, 'response_sent' ];
+        $payload['auth_status'] = 'accepted';
+        $payload['diagnostic_trace'] = [
+            'trace_id'           => $trace_id,
+            'auth_status'        => 'accepted',
+            'stage'              => $stage,
+            'engine'             => '',
+            'fallback_triggered' => false,
+            'error_code'         => $err_code,
+            'memory_status'      => $memory_status,
+            'duplicate_blocked'  => (bool) $duplicate,
+            'empty_reply'        => false,
+            'steps'              => $steps,
+        ];
+        if ( class_exists( 'SA_Diagnostic_Logger' ) ) {
+            $ok_flag = isset( $payload['ok'] ) ? (bool) $payload['ok'] : ( $http_status < 400 );
+            $anomalies = [];
+            if ( ! $ok_flag && 200 === (int) $http_status ) {
+                $anomalies[] = 'HTTP_200_LOGICAL_FAILURE';
+            }
+            if ( 'failed' === $memory_status ) {
+                $anomalies[] = 'MEMORY_RETRIEVAL_FAILED';
+            }
+            if ( $duplicate ) {
+                $anomalies[] = 'DUPLICATE_MESSAGE_OR_REPLY';
+            }
+            SA_Diagnostic_Logger::log_event( [
+                'trace_id'          => $trace_id,
+                'operation'         => $operation,
+                'method'            => 'GET' === strtoupper( $operation ) ? 'GET' : 'POST',
+                'path'              => $path,
+                'http_status'       => (int) $http_status,
+                'auth_state'        => 'SERVER_ACCEPTED',
+                'stage'             => $stage,
+                'error_code'        => $err_code,
+                'short_description' => (string) ( $payload['error'] ?? $payload['message'] ?? ( $ok_flag ? 'تم تنفيذ العملية بنجاح' : 'تعذر إتمام العملية' ) ),
+                'outcome'           => $ok_flag ? ( $duplicate ? 'UNKNOWN' : 'SUCCESS' ) : 'FAILURE',
+                'anomalies'         => $anomalies,
+                'steps'             => $steps,
+            ] );
+        }
+        return $payload;
+    }
+
     // -------------------------------------------------------------------------
     // 1. Capabilities Endpoint (GET /whatsapp/assistant/capabilities)
     // -------------------------------------------------------------------------
 
-    public static function capabilities() {
+    public static function capabilities( $request = null ) {
         if ( ! self::enabled( 'integration_enabled' ) ) {
             return new WP_Error( 'sa_automate_integration_disabled', 'تكامل AutoMate AI غير مفعّل.', [ 'status' => 403 ] );
         }
@@ -141,10 +188,10 @@ class SA_AutoMate_Integration {
             ? trim( wp_strip_all_tags( html_entity_decode( (string) get_bloginfo( 'name' ), ENT_QUOTES, 'UTF-8' ) ) )
             : '';
 
-        return self::respond( [
+        $payload = self::attach_diag( $request, [
             'ok'                      => true,
             'integration'             => 'automate_smart_cooperation',
-            'version'                 => defined( 'MBA_VERSION' ) ? MBA_VERSION : '6.5.3',
+            'version'                 => defined( 'MBA_VERSION' ) ? MBA_VERSION : '6.5.7',
             'store_name'              => $store_name,
             // Boolean capability flags expected directly by AutoMate SmartAdvisorClient:
             'knowledge'               => $knowledge_enabled,
@@ -178,7 +225,9 @@ class SA_AutoMate_Integration {
                 'max_bytes'                 => self::MAX_MEMORY_BYTES,
                 'requires_customer_consent' => true,
             ],
-        ], 200 );
+        ], 'sa_capabilities', '/wp-json/smart-advisor/v1/whatsapp/assistant/capabilities', 'auth_verified', 200 );
+
+        return self::respond( $payload, 200 );
     }
 
     // -------------------------------------------------------------------------
@@ -340,22 +389,22 @@ class SA_AutoMate_Integration {
         }
 
         if ( ! $current_state['found'] && null === $current_state['memory'] ) {
-            return self::respond( [
+            return self::respond( self::attach_diag( $request, [
                 'ok'               => true,
                 'found'            => false,
                 'consent_required' => false,
                 'revision'         => 0,
                 'memory'           => null,
-            ], 200 );
+            ], 'sa_memory_get', '/wp-json/smart-advisor/v1/whatsapp/assistant/memory', 'context_memory_loaded', 200, 'not_found' ), 200 );
         }
 
-        return self::respond( [
+        return self::respond( self::attach_diag( $request, [
             'ok'               => true,
             'found'            => true,
             'consent_required' => false,
             'revision'         => $current_revision,
             'memory'           => $current_state['memory'],
-        ], 200 );
+        ], 'sa_memory_get', '/wp-json/smart-advisor/v1/whatsapp/assistant/memory', 'context_memory_loaded', 200, 'loaded' ), 200 );
     }
 
     // -------------------------------------------------------------------------
@@ -466,7 +515,7 @@ class SA_AutoMate_Integration {
         $summary = self::build_knowledge_summary( $intent, $facts, $products );
         $has_verified = ! empty( $facts ) || ! empty( $products );
 
-        return self::respond( [
+        return self::respond( self::attach_diag( $request, [
             'ok'                => true,
             'source'            => 'smart_advisor_woocommerce',
             'store_name'        => $store_name,
@@ -478,7 +527,7 @@ class SA_AutoMate_Integration {
             'products'          => $products,
             'has_verified_data' => $has_verified,
             'instruction'       => 'هذه بيانات متجر موثوقة. لا تخترع حقائق أو أسعاراً غير موجودة، وصغ الرد النهائي في AutoMate AI.',
-        ], 200 );
+        ], 'sa_knowledge', '/wp-json/smart-advisor/v1/whatsapp/assistant/knowledge', 'context_memory_loaded', 200 ), 200 );
     }
 
     // -------------------------------------------------------------------------
@@ -582,16 +631,18 @@ class SA_AutoMate_Integration {
             }
         }
 
-        $finish_ok = function( $payload, $status = 200 ) use ( &$lock_closed, $lock_id, $owner_token ) {
+        $finish_ok = function( $payload, $status = 200 ) use ( &$lock_closed, $lock_id, $owner_token, $request ) {
             $lock_closed = true;
+            $payload = self::attach_diag( $request, $payload, 'sa_account_action', '/wp-json/smart-advisor/v1/whatsapp/assistant/account-action', 'reply_composed', $status );
             if ( $lock_id > 0 && '' !== $owner_token && class_exists( 'SA_WhatsApp_Inbox' ) ) {
                 SA_WhatsApp_Inbox::complete_action( $lock_id, $owner_token, $payload, $status );
             }
             return self::respond( $payload, $status );
         };
 
-        $finish_err = function( $inbox_status, $msg, $payload, $status = 503 ) use ( &$lock_closed, $lock_id, $owner_token ) {
+        $finish_err = function( $inbox_status, $msg, $payload, $status = 503 ) use ( &$lock_closed, $lock_id, $owner_token, $request ) {
             $lock_closed = true;
+            $payload = self::attach_diag( $request, $payload, 'sa_account_action', '/wp-json/smart-advisor/v1/whatsapp/assistant/account-action', 'wp_received', $status );
             if ( $lock_id > 0 && '' !== $owner_token && class_exists( 'SA_WhatsApp_Inbox' ) ) {
                 SA_WhatsApp_Inbox::fail_action( $lock_id, $owner_token, $inbox_status, $msg, $payload, $status );
             }
