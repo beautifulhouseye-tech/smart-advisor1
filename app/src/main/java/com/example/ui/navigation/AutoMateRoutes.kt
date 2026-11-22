@@ -43,3 +43,7 @@ data object TestReplyRoute
 
 @Serializable
 data object ReplyTemplatesRoute
+
+@Serializable
+data object DiagnosticsRoute
+

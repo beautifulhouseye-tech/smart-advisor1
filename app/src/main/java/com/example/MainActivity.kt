@@ -64,6 +64,7 @@ import androidx.navigation.compose.rememberNavController
 import com.example.security.BiometricLockHelper
 import com.example.ui.navigation.AISettingsRoute
 import com.example.ui.navigation.ContactsFilterRoute
+import com.example.ui.navigation.DiagnosticsRoute
 import com.example.ui.navigation.FollowUpRoute
 import com.example.ui.navigation.HomeRoute
 import com.example.ui.navigation.LogsRoute
@@ -79,6 +80,7 @@ import com.example.ui.navigation.ToolsAndMemoryRoute
 import com.example.ui.screens.AISettingsScreen
 import com.example.ui.screens.BiometricLockScreen
 import com.example.ui.screens.ContactsFilterScreen
+import com.example.ui.screens.DiagnosticsScreen
 import com.example.ui.screens.FollowUpScreen
 import com.example.ui.screens.HomeScreen
 import com.example.ui.screens.LogsScreen
@@ -222,7 +224,8 @@ fun AutoMateRootApp(
         currentDestination?.hasRoute(MenuReplyRoute::class) == true ||
         currentDestination?.hasRoute(FollowUpRoute::class) == true ||
         currentDestination?.hasRoute(ReplyTemplatesRoute::class) == true ||
-        currentDestination?.hasRoute(TestReplyRoute::class) == true
+        currentDestination?.hasRoute(TestReplyRoute::class) == true ||
+        currentDestination?.hasRoute(DiagnosticsRoute::class) == true
 
     fun navigateTopLevel(route: Any) {
         navController.navigate(route) {
@@ -368,7 +371,12 @@ fun AutoMateRootApp(
                             onExportJson = viewModel::exportBackup,
                             onImportJson = viewModel::importBackup,
                             isBiometricAvailable = isBiometricAvailable,
-                            onSetBiometricLock = viewModel::setBiometricLockEnabled
+                            onSetBiometricLock = viewModel::setBiometricLockEnabled,
+                            diagnosticEventsCount = uiState.diagnosticEventsCount,
+                            diagnosticErrorsCount = uiState.diagnosticErrorsCount,
+                            onSetDiagnosticLogging = viewModel::setDiagnosticLoggingEnabled,
+                            onNavigateToDiagnostics = { navController.navigate(DiagnosticsRoute) },
+                            onClearDiagnosticLogs = viewModel::clearDiagnosticLogs
                         )
                     }
 
@@ -442,6 +450,12 @@ fun AutoMateRootApp(
 
                     composable<TestReplyRoute> {
                         TestReplyScreen(
+                            onBack = { navController.popBackStack() }
+                        )
+                    }
+
+                    composable<DiagnosticsRoute> {
+                        DiagnosticsScreen(
                             onBack = { navController.popBackStack() }
                         )
                     }

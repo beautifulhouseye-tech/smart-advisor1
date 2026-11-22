@@ -125,10 +125,20 @@ class UnifiedSmartReplyService internal constructor(
         val fallbackTextReply: String = "",
         val storeName: String = "",
         val suppressedByUnknownIntent: Boolean = false,
-        val processingClassification: MessageProcessingClassification? = null
+        val processingClassification: MessageProcessingClassification? = null,
+        val traceId: String = ""
     )
 
     suspend fun resolve(request: Request): Decision {
+        val baseTraceId = DiagnosticTraceContext.newTraceId()
+        val decision = resolveInternal(request, baseTraceId)
+        val effectiveTraceId = decision.traceId.ifBlank { baseTraceId }
+        val finalDecision = if (decision.traceId.isBlank()) decision.copy(traceId = effectiveTraceId) else decision
+        recordStage11ReturnedToApp(request, finalDecision, effectiveTraceId)
+        return finalDecision
+    }
+
+    private suspend fun resolveInternal(request: Request, requestTraceId: String): Decision {
         val startMs = clockMs()
         val evaluated = mutableListOf<String>()
         val cleanMessage = request.messageText.trim()
@@ -362,7 +372,8 @@ class UnifiedSmartReplyService internal constructor(
                         stageLatenciesMs = collab.stageLatenciesMs,
                         redactedError = collab.redactedError,
                         suppressedByUnknownIntent = true,
-                        processingClassification = collab.processingClassification
+                        processingClassification = collab.processingClassification,
+                        traceId = collab.traceId
                     )
                 }
 
@@ -438,7 +449,8 @@ class UnifiedSmartReplyService internal constructor(
                         products = collab.products,
                         fallbackTextReply = collab.fallbackTextReply.ifBlank { finalReplyText },
                         storeName = collab.storeName,
-                        processingClassification = collab.processingClassification
+                        processingClassification = collab.processingClassification,
+                        traceId = collab.traceId
                     )
                 }
             } else {
@@ -565,7 +577,8 @@ class UnifiedSmartReplyService internal constructor(
                 val result = webhookClient.send(
                     config = serverConfig,
                     msg = msg,
-                    idempotencyKey = if (request.isSandbox) "test-preview-$startMs" else request.msgKey
+                    idempotencyKey = if (request.isSandbox) "test-preview-$startMs" else request.msgKey,
+                    traceId = requestTraceId
                 )
                 return mapExternalResult(
                     result = result,
@@ -574,7 +587,8 @@ class UnifiedSmartReplyService internal constructor(
                     successCategory = ReplySourceCategory.WEBHOOK,
                     evaluated = evaluated,
                     elapsedMs = elapsed(startMs),
-                    conversationKey = resolvedConvKey
+                    conversationKey = resolvedConvKey,
+                    traceId = requestTraceId
                 )
             }
 
@@ -585,7 +599,8 @@ class UnifiedSmartReplyService internal constructor(
                 val result = smartAdvisorClient.send(
                     msg = msg,
                     idempotencyKey = if (request.isSandbox) "test-preview-$startMs" else request.msgKey,
-                    excludeProductIds = shownIds
+                    excludeProductIds = shownIds,
+                    traceId = requestTraceId
                 )
                 return mapExternalResult(
                     result = result,
@@ -594,7 +609,8 @@ class UnifiedSmartReplyService internal constructor(
                     successCategory = ReplySourceCategory.SMART_ADVISOR,
                     evaluated = evaluated,
                     elapsedMs = elapsed(startMs),
-                    conversationKey = resolvedConvKey
+                    conversationKey = resolvedConvKey,
+                    traceId = requestTraceId
                 )
             }
         }
@@ -638,7 +654,8 @@ class UnifiedSmartReplyService internal constructor(
             toolRoundsUsed = lastAiOutcome?.toolRoundsUsed ?: 0,
             stageLatenciesMs = lastAiOutcome?.stageLatenciesMs.orEmpty(),
             redactedError = err,
-            processingClassification = finalClassification
+            processingClassification = finalClassification,
+            traceId = lastAiOutcome?.traceId?.ifBlank { requestTraceId } ?: requestTraceId
         )
     }
 
@@ -749,7 +766,8 @@ class UnifiedSmartReplyService internal constructor(
         successCategory: ReplySourceCategory,
         evaluated: List<String>,
         elapsedMs: Long,
-        conversationKey: String
+        conversationKey: String,
+        traceId: String
     ): Decision {
         return when (result) {
             is HttpTransport.Result.Success -> {
@@ -789,7 +807,8 @@ class UnifiedSmartReplyService internal constructor(
                                 productMessage = parsed.selectedProduct,
                                 products = parsed.products,
                                 fallbackTextReply = fallbackText,
-                                storeName = parsed.storeName
+                                storeName = parsed.storeName,
+                                traceId = traceId
                             )
                         }
                         if (parsed.replyText.isNotBlank()) {
@@ -808,7 +827,8 @@ class UnifiedSmartReplyService internal constructor(
                                 responseType = parsed.responseType,
                                 products = parsed.products,
                                 fallbackTextReply = scrubbed,
-                                storeName = parsed.storeName
+                                storeName = parsed.storeName,
+                                traceId = traceId
                             )
                         }
                     }
@@ -825,7 +845,8 @@ class UnifiedSmartReplyService internal constructor(
                         sourceCategory = successCategory,
                         evaluatedPath = evaluated,
                         latencyMs = elapsedMs,
-                        conversationKey = conversationKey
+                        conversationKey = conversationKey,
+                        traceId = traceId
                     )
                 } else {
                     val msg = "استجاب الخادم بنجاح ولكن حقل الرد ($replyKey) فارغ."
@@ -842,7 +863,8 @@ class UnifiedSmartReplyService internal constructor(
                             status = MessageProcessingStatus.INVALID_RESPONSE,
                             source = successLabel,
                             failureReason = "empty_external_response"
-                        )
+                        ),
+                        traceId = traceId
                     )
                 }
             }
@@ -861,7 +883,8 @@ class UnifiedSmartReplyService internal constructor(
                         status = MessageProcessingStatus.SERVICE_ERROR,
                         source = successLabel,
                         failureReason = "http_409_conflict"
-                    )
+                    ),
+                    traceId = traceId
                 )
             }
             is HttpTransport.Result.Failure -> {
@@ -885,10 +908,53 @@ class UnifiedSmartReplyService internal constructor(
                         status = if (isTimeout) MessageProcessingStatus.TIMEOUT else MessageProcessingStatus.SERVICE_ERROR,
                         source = successLabel,
                         failureReason = safeErr
-                    )
+                    ),
+                    traceId = traceId
                 )
             }
         }
+    }
+
+    private fun recordStage11ReturnedToApp(request: Request, decision: Decision, traceId: String) {
+        if (!decision.usedSmartCollaboration && !decision.calledSmartAdvisor && !decision.calledWebhook && decision.sourceCategory != ReplySourceCategory.ERROR) {
+            return
+        }
+        val anomalies = mutableListOf<DiagnosticAnomaly>()
+        val isEmptyMatchedReply = decision.matched && decision.replyText.isBlank() && decision.imageUri.isNullOrBlank()
+        if (isEmptyMatchedReply || decision.processingClassification?.failureReason == "empty_external_response") {
+            anomalies += DiagnosticAnomaly.EMPTY_REPLY
+        }
+        val outcome = when {
+            decision.sourceCategory == ReplySourceCategory.ERROR -> DiagnosticOutcome.FAILURE
+            isEmptyMatchedReply -> DiagnosticOutcome.FAILURE
+            decision.suppressedByUnknownIntent -> DiagnosticOutcome.UNKNOWN
+            decision.matched -> DiagnosticOutcome.SUCCESS
+            else -> DiagnosticOutcome.UNKNOWN
+        }
+        val category = when {
+            anomalies.isNotEmpty() -> DiagnosticCategory.REPLY_ANOMALY
+            decision.sourceCategory == ReplySourceCategory.ERROR -> DiagnosticCategory.NETWORK_HTTP
+            else -> DiagnosticCategory.STAGE_PIPELINE
+        }
+        diagnosticLogger.logTrace(
+            traceId = traceId,
+            operationType = if (request.isSandbox) "sandbox_reply_resolution" else "live_reply_resolution",
+            stage = DiagnosticStage.STAGE_11_REPLY_RETURNED_TO_APP,
+            outcome = outcome,
+            category = category,
+            latencyMs = decision.latencyMs,
+            errorCode = decision.processingClassification?.status?.name?.lowercase().orEmpty(),
+            description = when {
+                decision.matched -> "تم إرجاع الرد إلى التطبيق بنجاح (${decision.sourceCategory.name})"
+                decision.suppressedByUnknownIntent -> "عاد القرار بكتم الرد لعدم فهم الرسالة"
+                !decision.redactedError.isNullOrBlank() -> decision.redactedError
+                else -> "عاد التقييم بدون رد مطابق"
+            },
+            engineUsed = decision.activeEngineLabel,
+            fallbackTriggered = decision.switchedToQwen,
+            anomalies = anomalies,
+            isVerboseStep = outcome == DiagnosticOutcome.SUCCESS && anomalies.isEmpty()
+        )
     }
 
     private fun elapsed(startMs: Long): Long = (clockMs() - startMs).coerceAtLeast(0L)

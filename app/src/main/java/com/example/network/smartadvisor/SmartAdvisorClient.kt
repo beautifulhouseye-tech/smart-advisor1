@@ -1,7 +1,16 @@
 package com.example.network.smartadvisor
 
 import com.example.data.security.SmartAdvisorPrefs
+import com.example.engine.DiagnosticAnomaly
+import com.example.engine.DiagnosticAuthState
+import com.example.engine.DiagnosticCategory
+import com.example.engine.DiagnosticNetworkRecorder
+import com.example.engine.DiagnosticOutcome
+import com.example.engine.DiagnosticSanitizer
+import com.example.engine.DiagnosticStage
+import com.example.engine.DiagnosticTraceContext
 import com.example.engine.IncomingMessage
+import com.example.engine.SafeDiagnosticLogger
 import com.example.network.HttpTransport
 import com.example.network.security.SecretVault
 import com.example.network.security.SensitiveDataRedactor
@@ -30,9 +39,26 @@ class SmartAdvisorClient internal constructor(
     private val apiKeyRefProvider: () -> String,
     private val timeoutSecondsProvider: () -> Int = { HttpTransport.DEFAULT_TIMEOUT_SECONDS },
     private val maxAttemptsProvider: () -> Int = { HttpTransport.DEFAULT_MAX_ATTEMPTS },
-    private val clockMs: () -> Long = { System.currentTimeMillis() }
+    private val clockMs: () -> Long = { System.currentTimeMillis() },
+    private val diagnosticLogger: SafeDiagnosticLogger? = null
 ) {
     @Inject
+    constructor(
+        transport: HttpTransport,
+        prefs: SmartAdvisorPrefs,
+        vault: SecretVault,
+        diagnosticLogger: SafeDiagnosticLogger
+    ) : this(
+        transport = transport,
+        vault = vault,
+        baseUrlProvider = { prefs.baseUrl },
+        apiKeyRefProvider = { prefs.apiKeyRef },
+        timeoutSecondsProvider = { prefs.timeoutSeconds },
+        maxAttemptsProvider = { prefs.maxAttempts },
+        clockMs = { System.currentTimeMillis() },
+        diagnosticLogger = diagnosticLogger
+    )
+
     constructor(
         transport: HttpTransport,
         prefs: SmartAdvisorPrefs,
@@ -44,7 +70,8 @@ class SmartAdvisorClient internal constructor(
         apiKeyRefProvider = { prefs.apiKeyRef },
         timeoutSecondsProvider = { prefs.timeoutSeconds },
         maxAttemptsProvider = { prefs.maxAttempts },
-        clockMs = { System.currentTimeMillis() }
+        clockMs = { System.currentTimeMillis() },
+        diagnosticLogger = null
     )
 
     data class SaCapabilities(
@@ -176,13 +203,32 @@ class SmartAdvisorClient internal constructor(
     suspend fun send(
         msg: IncomingMessage,
         idempotencyKey: String? = null,
-        excludeProductIds: List<Long> = emptyList()
+        excludeProductIds: List<Long> = emptyList(),
+        traceId: String = DiagnosticTraceContext.newTraceId()
     ): HttpTransport.Result {
         val url = endpoint()
         if (url.isBlank()) {
+            DiagnosticNetworkRecorder.recordPreSendBlocked(
+                logger = diagnosticLogger,
+                traceId = traceId,
+                operationType = "sa_whatsapp_reply",
+                method = "POST",
+                rawUrl = url,
+                errorCode = "missing_url",
+                reasonAr = "رابط Smart Advisor غير مهيأ"
+            )
             return unconfiguredFailure()
         }
         if (!url.startsWith("https://", ignoreCase = true)) {
+            DiagnosticNetworkRecorder.recordPreSendBlocked(
+                logger = diagnosticLogger,
+                traceId = traceId,
+                operationType = "sa_whatsapp_reply",
+                method = "POST",
+                rawUrl = url,
+                errorCode = "insecure_transport",
+                reasonAr = "يتطلب Smart Advisor استخدام رابط HTTPS مشفر لحماية مفتاح API."
+            )
             return HttpTransport.Result.Failure(
                 error = "يتطلب Smart Advisor استخدام رابط HTTPS مشفر لحماية مفتاح API.",
                 code = -1,
@@ -191,12 +237,17 @@ class SmartAdvisorClient internal constructor(
                 retryable = false
             )
         }
-        val headers = buildHeaders()
+        val headers = prepareHeadersWithDiagnostics(
+            traceId = traceId,
+            operationType = "sa_whatsapp_reply",
+            method = "POST",
+            url = url
+        )
         val effectiveKey = idempotencyKey?.trim()?.takeIf { it.isNotEmpty() }
             ?: msg.notificationId.trim().takeIf {
                 it.isNotEmpty() && it != "smart-advisor-test" && !it.startsWith("queue-retry-")
             }
-        return transport.execute(
+        val result = transport.execute(
             url = url,
             method = "POST",
             headers = headers,
@@ -206,9 +257,21 @@ class SmartAdvisorClient internal constructor(
             timeoutSeconds = effectiveTimeoutSeconds(),
             idempotencyKey = effectiveKey
         )
+        DiagnosticNetworkRecorder.recordHttpResult(
+            logger = diagnosticLogger,
+            traceId = traceId,
+            operationType = "sa_whatsapp_reply",
+            method = "POST",
+            rawUrl = url,
+            result = result,
+            defaultStage = DiagnosticStage.STAGE_09_ENGINE_RESPONSE_RECEIVED,
+            extraSecretsToRedact = currentApiSecrets(),
+            expectReplyPayload = true
+        )
+        return result
     }
 
-    suspend fun test(): HttpTransport.Result {
+    suspend fun test(traceId: String = DiagnosticTraceContext.newTraceId()): HttpTransport.Result {
         val testMsg = IncomingMessage(
             app = "com.whatsapp",
             sender = "AutoMate-Test",
@@ -219,14 +282,17 @@ class SmartAdvisorClient internal constructor(
             isGroup = false,
             notificationId = "smart-advisor-test"
         )
-        return send(testMsg)
+        return send(testMsg, traceId = traceId)
     }
 
     // -------------------------------------------------------------------------
     // Smart Advisor 6.5.0 Assistant Endpoints
     // -------------------------------------------------------------------------
 
-    suspend fun fetchCapabilities(forceRefresh: Boolean = false): SaCapabilities {
+    suspend fun fetchCapabilities(
+        forceRefresh: Boolean = false,
+        traceId: String = DiagnosticTraceContext.newTraceId()
+    ): SaCapabilities {
         val base = assistantBaseUrl()
         if (base.isBlank()) return SaCapabilities()
 
@@ -238,14 +304,25 @@ class SmartAdvisorClient internal constructor(
             }
         }
 
+        val url = "$base/capabilities"
         val res = transport.execute(
-            url = "$base/capabilities",
+            url = url,
             method = "GET",
-            headers = buildHeaders(),
+            headers = prepareHeadersWithDiagnostics(traceId, "sa_capabilities", "GET", url),
             body = null,
             contentType = "JSON",
             maxAttempts = 1,
             timeoutSeconds = effectiveTimeoutSeconds()
+        )
+        DiagnosticNetworkRecorder.recordHttpResult(
+            logger = diagnosticLogger,
+            traceId = traceId,
+            operationType = "sa_capabilities",
+            method = "GET",
+            rawUrl = url,
+            result = res,
+            defaultStage = DiagnosticStage.STAGE_03_AUTH_VERIFIED,
+            extraSecretsToRedact = currentApiSecrets()
         )
         if (res is HttpTransport.Result.Success) {
             val parsed = runCatching {
@@ -279,10 +356,20 @@ class SmartAdvisorClient internal constructor(
         intent: String,
         customerKey: String = "",
         isGroup: Boolean = false,
-        excludeProductIds: List<Long> = emptyList()
+        excludeProductIds: List<Long> = emptyList(),
+        traceId: String = DiagnosticTraceContext.newTraceId()
     ): SaKnowledgeResponse {
         val base = assistantBaseUrl()
         if (base.isBlank()) {
+            DiagnosticNetworkRecorder.recordPreSendBlocked(
+                logger = diagnosticLogger,
+                traceId = traceId,
+                operationType = "sa_knowledge",
+                method = "POST",
+                rawUrl = "",
+                errorCode = "missing_url",
+                reasonAr = "رابط Smart Advisor الآمن (HTTPS) غير مهيأ"
+            )
             return SaKnowledgeResponse(
                 ok = false,
                 hasVerifiedData = false,
@@ -308,14 +395,25 @@ class SmartAdvisorClient internal constructor(
             }
         }.toString()
 
+        val url = "$base/knowledge"
         val result = transport.execute(
-            url = "$base/knowledge",
+            url = url,
             method = "POST",
-            headers = buildHeaders(),
+            headers = prepareHeadersWithDiagnostics(traceId, "sa_knowledge", "POST", url),
             body = payload,
             contentType = "JSON",
             maxAttempts = 1,
             timeoutSeconds = effectiveTimeoutSeconds()
+        )
+        DiagnosticNetworkRecorder.recordHttpResult(
+            logger = diagnosticLogger,
+            traceId = traceId,
+            operationType = "sa_knowledge",
+            method = "POST",
+            rawUrl = url,
+            result = result,
+            defaultStage = DiagnosticStage.STAGE_09_ENGINE_RESPONSE_RECEIVED,
+            extraSecretsToRedact = currentApiSecrets()
         )
 
         return when (result) {
@@ -340,7 +438,8 @@ class SmartAdvisorClient internal constructor(
 
     suspend fun getCustomerMemory(
         customerKey: String,
-        phone: String = ""
+        phone: String = "",
+        traceId: String = DiagnosticTraceContext.newTraceId()
     ): SaMemoryResponse {
         val base = assistantBaseUrl()
         if (base.isBlank() || customerKey.isBlank()) {
@@ -353,17 +452,28 @@ class SmartAdvisorClient internal constructor(
             if (phone.isNotBlank()) put("phone", JsonPrimitive(phone))
         }.toString()
 
-        return when (
-            val result = transport.execute(
-                url = "$base/memory",
-                method = "POST",
-                headers = buildHeaders(),
-                body = payload,
-                contentType = "JSON",
-                maxAttempts = 1,
-                timeoutSeconds = effectiveTimeoutSeconds()
-            )
-        ) {
+        val url = "$base/memory"
+        val result = transport.execute(
+            url = url,
+            method = "POST",
+            headers = prepareHeadersWithDiagnostics(traceId, "sa_memory_get", "POST", url),
+            body = payload,
+            contentType = "JSON",
+            maxAttempts = 1,
+            timeoutSeconds = effectiveTimeoutSeconds()
+        )
+        DiagnosticNetworkRecorder.recordHttpResult(
+            logger = diagnosticLogger,
+            traceId = traceId,
+            operationType = "sa_memory_get",
+            method = "POST",
+            rawUrl = url,
+            result = result,
+            defaultStage = DiagnosticStage.STAGE_05_CONTEXT_MEMORY_LOADED,
+            extraSecretsToRedact = currentApiSecrets()
+        )
+
+        val response = when (result) {
             is HttpTransport.Result.Success -> parseMemoryResponse(result.body, result.code)
             is HttpTransport.Result.Conflict -> parseMemoryConflict(result.body, result.code)
             is HttpTransport.Result.Failure -> SaMemoryResponse(
@@ -373,6 +483,23 @@ class SmartAdvisorClient internal constructor(
                 error = SensitiveDataRedactor.scrub(result.error, vault)
             )
         }
+        if (!response.ok && !response.consentRequired && !response.skillDisabled) {
+            diagnosticLogger?.logTrace(
+                traceId = traceId,
+                operationType = "sa_memory_get",
+                stage = DiagnosticStage.STAGE_05_CONTEXT_MEMORY_LOADED,
+                outcome = DiagnosticOutcome.FAILURE,
+                category = DiagnosticCategory.MEMORY_CONTEXT,
+                httpMethod = "POST",
+                rawUrl = url,
+                httpStatusCode = response.statusCode,
+                errorCode = "memory_retrieval_failed",
+                description = response.error ?: "فشل استرجاع ذاكرة العميل من الخادم",
+                anomalies = listOf(DiagnosticAnomaly.MEMORY_RETRIEVAL_FAILED),
+                extraSecretsToRedact = currentApiSecrets()
+            )
+        }
+        return response
     }
 
     suspend fun saveCustomerMemory(
@@ -381,7 +508,8 @@ class SmartAdvisorClient internal constructor(
         revision: Long,
         memory: SaMemoryPayload,
         consentConfirmed: Boolean,
-        phone: String = ""
+        phone: String = "",
+        traceId: String = DiagnosticTraceContext.newTraceId()
     ): SaMemoryResponse {
         val base = assistantBaseUrl()
         if (base.isBlank() || customerKey.isBlank()) {
@@ -418,18 +546,29 @@ class SmartAdvisorClient internal constructor(
             })
         }.toString()
 
-        return when (
-            val result = transport.execute(
-                url = "$base/memory",
-                method = "POST",
-                headers = buildHeaders(),
-                body = payload,
-                contentType = "JSON",
-                maxAttempts = 1,
-                timeoutSeconds = effectiveTimeoutSeconds(),
-                idempotencyKey = eventId
-            )
-        ) {
+        val url = "$base/memory"
+        val result = transport.execute(
+            url = url,
+            method = "POST",
+            headers = prepareHeadersWithDiagnostics(traceId, "sa_memory_save", "POST", url),
+            body = payload,
+            contentType = "JSON",
+            maxAttempts = 1,
+            timeoutSeconds = effectiveTimeoutSeconds(),
+            idempotencyKey = eventId
+        )
+        DiagnosticNetworkRecorder.recordHttpResult(
+            logger = diagnosticLogger,
+            traceId = traceId,
+            operationType = "sa_memory_save",
+            method = "POST",
+            rawUrl = url,
+            result = result,
+            defaultStage = DiagnosticStage.STAGE_05_CONTEXT_MEMORY_LOADED,
+            extraSecretsToRedact = currentApiSecrets()
+        )
+
+        return when (result) {
             is HttpTransport.Result.Success -> parseMemoryResponse(result.body, result.code)
             is HttpTransport.Result.Conflict -> parseMemoryConflict(result.body, result.code)
             is HttpTransport.Result.Failure -> SaMemoryResponse(
@@ -447,7 +586,8 @@ class SmartAdvisorClient internal constructor(
         phone: String = "",
         email: String = "",
         name: String = "",
-        idempotencyKey: String? = null
+        idempotencyKey: String? = null,
+        traceId: String = DiagnosticTraceContext.newTraceId()
     ): SaAccountActionResponse {
         val base = assistantBaseUrl()
         if (base.isBlank()) {
@@ -474,18 +614,29 @@ class SmartAdvisorClient internal constructor(
             if (name.isNotBlank()) put("name", JsonPrimitive(name))
         }.toString()
 
-        return when (
-            val result = transport.execute(
-                url = "$base/account-action",
-                method = "POST",
-                headers = buildHeaders(),
-                body = payload,
-                contentType = "JSON",
-                maxAttempts = 1,
-                timeoutSeconds = effectiveTimeoutSeconds(),
-                idempotencyKey = idempotencyKey?.trim()?.takeIf { it.isNotEmpty() }
-            )
-        ) {
+        val url = "$base/account-action"
+        val result = transport.execute(
+            url = url,
+            method = "POST",
+            headers = prepareHeadersWithDiagnostics(traceId, "sa_account_action", "POST", url),
+            body = payload,
+            contentType = "JSON",
+            maxAttempts = 1,
+            timeoutSeconds = effectiveTimeoutSeconds(),
+            idempotencyKey = idempotencyKey?.trim()?.takeIf { it.isNotEmpty() }
+        )
+        DiagnosticNetworkRecorder.recordHttpResult(
+            logger = diagnosticLogger,
+            traceId = traceId,
+            operationType = "sa_account_action",
+            method = "POST",
+            rawUrl = url,
+            result = result,
+            defaultStage = DiagnosticStage.STAGE_10_REPLY_COMPOSED,
+            extraSecretsToRedact = currentApiSecrets()
+        )
+
+        return when (result) {
             is HttpTransport.Result.Success -> parseAccountActionSuccess(result.body, result.code)
             is HttpTransport.Result.Conflict -> SaAccountActionResponse(
                 ok = false,
@@ -499,6 +650,43 @@ class SmartAdvisorClient internal constructor(
                 error = SensitiveDataRedactor.scrub(result.error, vault)
             )
         }
+    }
+
+    private fun prepareHeadersWithDiagnostics(
+        traceId: String,
+        operationType: String,
+        method: String,
+        url: String
+    ): Map<String, String> {
+        val authHeaders = buildHeaders()
+        if (authHeaders.containsKey(HEADER_API_KEY)) {
+            DiagnosticNetworkRecorder.recordHeaderAttached(
+                logger = diagnosticLogger,
+                traceId = traceId,
+                operationType = operationType,
+                method = method,
+                rawUrl = url,
+                headerName = HEADER_API_KEY
+            )
+        } else {
+            DiagnosticNetworkRecorder.recordPreSendBlocked(
+                logger = diagnosticLogger,
+                traceId = traceId,
+                operationType = operationType,
+                method = method,
+                rawUrl = url,
+                errorCode = "sa_missing_key_client",
+                reasonAr = "مفتاح X-SA-API-Key غير مضبوط محلياً عند تجهيز الطلب"
+            )
+        }
+        return authHeaders + (DiagnosticSanitizer.HEADER_TRACE_ID to traceId)
+    }
+
+    private fun currentApiSecrets(): List<String> {
+        val ref = apiKeyRefProvider().trim()
+        if (ref.isEmpty()) return emptyList()
+        val key = vault.get(ref).trim()
+        return if (key.length >= 4) listOf(key) else emptyList()
     }
 
     fun clearCapabilitiesCache() {

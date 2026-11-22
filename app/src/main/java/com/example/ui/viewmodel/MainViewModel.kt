@@ -13,7 +13,9 @@ import com.example.data.preferences.AutoMateSettings
 import com.example.data.preferences.ContactFilterMode
 import com.example.data.repository.AutoMateRepository
 import com.example.driving.DrivingModeManager
+import com.example.engine.DiagnosticOutcome
 import com.example.engine.PendingReplyCoordinator
+import com.example.engine.SafeDiagnosticLogger
 import com.example.engine.ServiceConnectionStatus
 import com.example.service.AutoReplyKeepAliveService
 import com.example.service.ServiceStatusHelper
@@ -39,7 +41,9 @@ data class MainUiState(
     val serviceConnection: ServiceConnectionStatus = ServiceConnectionStatus(),
     val permissions: SystemPermissionsState = SystemPermissionsState(),
     val statusMessage: String? = null,
-    val isSettingsLoaded: Boolean = false
+    val isSettingsLoaded: Boolean = false,
+    val diagnosticEventsCount: Int = 0,
+    val diagnosticErrorsCount: Int = 0
 )
 
 @HiltViewModel
@@ -48,7 +52,8 @@ class MainViewModel @Inject constructor(
     private val repository: AutoMateRepository,
     private val pendingReplyCoordinator: PendingReplyCoordinator,
     private val scheduleCoordinator: ScheduleCoordinator,
-    private val drivingModeManager: DrivingModeManager
+    private val drivingModeManager: DrivingModeManager,
+    private val diagnosticLogger: SafeDiagnosticLogger
 ) : ViewModel() {
 
     private val permissionsFlow = MutableStateFlow(ServiceStatusHelper.inspectPermissions(context))
@@ -64,13 +69,21 @@ class MainViewModel @Inject constructor(
         CoreDataBundle(settings, rules, templates, filters, logs, 0)
     }
 
+    private val combinedDiagnostics = combine(
+        permissionsFlow,
+        statusMessageFlow,
+        diagnosticLogger.traceRecords
+    ) { perms, msg, traces ->
+        Triple(perms, msg, traces)
+    }
+
     val uiState: StateFlow<MainUiState> = combine(
         coreDataFlow,
         repository.observeTodayRepliesCount(),
         pendingReplyCoordinator.connectionStatus,
-        permissionsFlow,
-        statusMessageFlow
-    ) { core, todayCount, conn, perms, msg ->
+        combinedDiagnostics
+    ) { core, todayCount, conn, diagTriple ->
+        val (perms, msg, traces) = diagTriple
         MainUiState(
             settings = core.settings,
             rules = core.rules,
@@ -81,7 +94,11 @@ class MainViewModel @Inject constructor(
             serviceConnection = conn,
             permissions = perms,
             statusMessage = msg,
-            isSettingsLoaded = true
+            isSettingsLoaded = true,
+            diagnosticEventsCount = traces.size,
+            diagnosticErrorsCount = traces.count {
+                it.outcome != DiagnosticOutcome.SUCCESS || it.anomalies.isNotEmpty()
+            }
         )
     }.stateIn(
         scope = viewModelScope,
@@ -292,6 +309,23 @@ class MainViewModel @Inject constructor(
         viewModelScope.launch {
             repository.setBiometricLockEnabled(enabled)
         }
+    }
+
+    fun setDiagnosticLoggingEnabled(enabled: Boolean) {
+        viewModelScope.launch {
+            repository.setDiagnosticLoggingEnabled(enabled)
+            diagnosticLogger.setDetailedLoggingEnabled(enabled)
+            statusMessageFlow.value = if (enabled) {
+                "تم تفعيل التسجيل التشخيصي التفصيلي"
+            } else {
+                "تم إيقاف التسجيل التشخيصي التفصيلي"
+            }
+        }
+    }
+
+    fun clearDiagnosticLogs() {
+        diagnosticLogger.clearTraceLogsOnly()
+        statusMessageFlow.value = "تم مسح سجل التشخيص والأخطاء"
     }
 
     fun exportBackup(uri: Uri) {

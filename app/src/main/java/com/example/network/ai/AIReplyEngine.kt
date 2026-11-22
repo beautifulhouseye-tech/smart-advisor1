@@ -3,7 +3,14 @@ package com.example.network.ai
 import com.example.data.preferences.AiSettingsPrefs
 import com.example.data.preferences.AiSettingsState
 import com.example.data.preferences.ResponseLength
+import com.example.engine.DiagnosticAnomaly
+import com.example.engine.DiagnosticCategory
+import com.example.engine.DiagnosticOutcome
+import com.example.engine.DiagnosticSanitizer
+import com.example.engine.DiagnosticStage
+import com.example.engine.DiagnosticTraceContext
 import com.example.engine.EngineFailureCategory
+import com.example.engine.SafeDiagnosticLogger
 import com.example.engine.UnunderstoodIntentPolicy
 import com.example.network.HttpTransport
 import com.example.network.security.SecretVault
@@ -30,8 +37,13 @@ import javax.inject.Singleton
 @Singleton
 class AIReplyEngine @Inject constructor(
     private val transport: HttpTransport,
-    private val vault: SecretVault
+    private val vault: SecretVault,
+    private val diagnosticLogger: SafeDiagnosticLogger? = null
 ) {
+    constructor(
+        transport: HttpTransport,
+        vault: SecretVault
+    ) : this(transport = transport, vault = vault, diagnosticLogger = null)
     enum class Provider(val labelAr: String, val defaultModels: List<String>) {
         NEW_API("New API (بوابة OpenAI)", listOf("gpt-4o-mini", "gpt-4o", "qwen2.5:7b")),
         OLLAMA("Ollama (Qwen احتياطي)", listOf("qwen2.5:1.5b", "qwen2.5:7b", "llama3")),
@@ -194,25 +206,52 @@ class AIReplyEngine @Inject constructor(
         settings: AiSettingsState,
         userMessage: String,
         systemInstruction: String,
-        recentTurns: List<ChatTurn> = emptyList()
+        recentTurns: List<ChatTurn> = emptyList(),
+        traceId: String = DiagnosticTraceContext.newTraceId()
     ): CollaborationAiOutcome {
         val primaryLabel = resolvePrimaryEngineLabel(settings)
-        val startPrimaryNs = System.nanoTime()
+        diagnosticLogger?.logTrace(
+            traceId = traceId,
+            operationType = "ai_collaboration_turn",
+            stage = DiagnosticStage.STAGE_06_ENGINE_SELECTED,
+            outcome = DiagnosticOutcome.SUCCESS,
+            category = DiagnosticCategory.AI_ENGINE,
+            engineUsed = primaryLabel,
+            description = "تم اختيار المحرك الأساسي: $primaryLabel",
+            isVerboseStep = true
+        )
 
+        val startPrimaryNs = System.nanoTime()
         val primaryResult = executeEngineTurn(
             settings = settings,
             useFallbackEngine = false,
             systemInstruction = systemInstruction,
             recentTurns = recentTurns,
-            userMessage = userMessage
+            userMessage = userMessage,
+            traceId = traceId
         )
         val primaryLatencyMs = ((System.nanoTime() - startPrimaryNs) / 1_000_000L).coerceAtLeast(1L)
 
         var primaryFailureCategory = primaryResult.failureCategory
         var primaryErrorText = primaryResult.error
+        var primaryInvalidOrEmpty = false
         if (!primaryResult.text.isNullOrBlank()) {
             val decision = parseStructuredDecision(primaryResult.text)
             if (decision != null && isUsableDecision(decision)) {
+                diagnosticLogger?.logTrace(
+                    traceId = traceId,
+                    operationType = "ai_primary_turn",
+                    stage = DiagnosticStage.STAGE_09_ENGINE_RESPONSE_RECEIVED,
+                    outcome = DiagnosticOutcome.SUCCESS,
+                    category = DiagnosticCategory.AI_ENGINE,
+                    httpMethod = "POST",
+                    rawUrl = settings.primaryBaseUrl,
+                    latencyMs = primaryLatencyMs,
+                    httpStatusCode = primaryResult.statusCode,
+                    engineUsed = primaryLabel,
+                    description = "تم استلام استجابة صالحة من المحرك الأساسي",
+                    isVerboseStep = true
+                )
                 return CollaborationAiOutcome(
                     decision = decision,
                     primaryEngineLabel = primaryLabel,
@@ -224,11 +263,45 @@ class AIReplyEngine @Inject constructor(
             }
             primaryFailureCategory = EngineFailureCategory.INVALID_RESPONSE
             primaryErrorText = "استجابة غير صالحة أو فارغة من المحرك الرئيسي"
-        } else if (primaryFailureCategory == EngineFailureCategory.NONE) {
-            primaryFailureCategory = EngineFailureCategory.SERVICE_ERROR
+            primaryInvalidOrEmpty = true
+        } else {
+            if (primaryFailureCategory == EngineFailureCategory.NONE) {
+                primaryFailureCategory = EngineFailureCategory.SERVICE_ERROR
+            }
+            if (primaryFailureCategory == EngineFailureCategory.INVALID_RESPONSE) {
+                primaryInvalidOrEmpty = true
+            }
         }
 
         val primaryError = primaryErrorText ?: "فشل الحصول على استجابة من المحرك الرئيسي"
+        val primaryAnomalies = mutableListOf(DiagnosticAnomaly.PRIMARY_ENGINE_FAILED)
+        if (primaryInvalidOrEmpty) {
+            primaryAnomalies += if (primaryResult.text.isNullOrBlank()) {
+                DiagnosticAnomaly.EMPTY_REPLY
+            } else {
+                DiagnosticAnomaly.INVALID_REPLY
+            }
+        }
+        if (!settings.fallbackEnabled) {
+            primaryAnomalies += DiagnosticAnomaly.FALLBACK_NOT_TRIGGERED
+        }
+
+        diagnosticLogger?.logTrace(
+            traceId = traceId,
+            operationType = "ai_primary_turn",
+            stage = if (primaryInvalidOrEmpty) DiagnosticStage.STAGE_09_ENGINE_RESPONSE_RECEIVED else DiagnosticStage.STAGE_07_NEWAPI_DISPATCHED,
+            outcome = DiagnosticOutcome.FAILURE,
+            category = DiagnosticCategory.AI_ENGINE,
+            httpMethod = "POST",
+            rawUrl = settings.primaryBaseUrl,
+            latencyMs = primaryLatencyMs,
+            httpStatusCode = primaryResult.statusCode,
+            errorCode = primaryFailureCategory.name.lowercase(),
+            engineUsed = primaryLabel,
+            description = redactError(primaryError),
+            anomalies = primaryAnomalies
+        )
+
         if (!settings.fallbackEnabled) {
             return CollaborationAiOutcome(
                 decision = null,
@@ -248,15 +321,32 @@ class AIReplyEngine @Inject constructor(
             useFallbackEngine = true,
             systemInstruction = systemInstruction,
             recentTurns = recentTurns,
-            userMessage = userMessage
+            userMessage = userMessage,
+            traceId = traceId
         )
         val fallbackLatencyMs = ((System.nanoTime() - startFallbackNs) / 1_000_000L).coerceAtLeast(1L)
 
         var fallbackFailureCategory = fallbackResult.failureCategory
         var fallbackErrorText = fallbackResult.error
+        var fallbackInvalidOrEmpty = false
         if (!fallbackResult.text.isNullOrBlank()) {
             val decision = parseStructuredDecision(fallbackResult.text)
             if (decision != null && isUsableDecision(decision)) {
+                diagnosticLogger?.logTrace(
+                    traceId = traceId,
+                    operationType = "ai_fallback_turn",
+                    stage = DiagnosticStage.STAGE_08_QWEN_FALLBACK_DISPATCHED,
+                    outcome = DiagnosticOutcome.SUCCESS,
+                    category = DiagnosticCategory.AI_ENGINE,
+                    httpMethod = "POST",
+                    rawUrl = if (settings.fallbackUseNewApiGateway) settings.primaryBaseUrl else settings.ollamaBaseUrl,
+                    latencyMs = fallbackLatencyMs,
+                    httpStatusCode = fallbackResult.statusCode,
+                    engineUsed = fallbackLabel,
+                    fallbackTriggered = true,
+                    description = "تم التحويل بنجاح إلى المحرك الاحتياطي: $fallbackLabel",
+                    isVerboseStep = false
+                )
                 return CollaborationAiOutcome(
                     decision = decision,
                     primaryEngineLabel = primaryLabel,
@@ -270,8 +360,14 @@ class AIReplyEngine @Inject constructor(
             }
             fallbackFailureCategory = EngineFailureCategory.INVALID_RESPONSE
             fallbackErrorText = "استجابة غير صالحة أو فارغة من المحرك الاحتياطي"
-        } else if (fallbackFailureCategory == EngineFailureCategory.NONE) {
-            fallbackFailureCategory = EngineFailureCategory.SERVICE_ERROR
+            fallbackInvalidOrEmpty = true
+        } else {
+            if (fallbackFailureCategory == EngineFailureCategory.NONE) {
+                fallbackFailureCategory = EngineFailureCategory.SERVICE_ERROR
+            }
+            if (fallbackFailureCategory == EngineFailureCategory.INVALID_RESPONSE) {
+                fallbackInvalidOrEmpty = true
+            }
         }
 
         val effectiveFailureCategory = when {
@@ -292,6 +388,33 @@ class AIReplyEngine @Inject constructor(
                 append(fallbackErrorText)
             }
         }
+        val fallbackAnomalies = mutableListOf(
+            DiagnosticAnomaly.PRIMARY_ENGINE_FAILED,
+            DiagnosticAnomaly.FALLBACK_ENGINE_FAILED
+        )
+        if (fallbackInvalidOrEmpty) {
+            fallbackAnomalies += if (fallbackResult.text.isNullOrBlank()) {
+                DiagnosticAnomaly.EMPTY_REPLY
+            } else {
+                DiagnosticAnomaly.INVALID_REPLY
+            }
+        }
+        diagnosticLogger?.logTrace(
+            traceId = traceId,
+            operationType = "ai_fallback_turn",
+            stage = DiagnosticStage.STAGE_08_QWEN_FALLBACK_DISPATCHED,
+            outcome = DiagnosticOutcome.FAILURE,
+            category = DiagnosticCategory.AI_ENGINE,
+            httpMethod = "POST",
+            rawUrl = if (settings.fallbackUseNewApiGateway) settings.primaryBaseUrl else settings.ollamaBaseUrl,
+            latencyMs = fallbackLatencyMs,
+            httpStatusCode = fallbackResult.statusCode,
+            errorCode = effectiveFailureCategory.name.lowercase(),
+            engineUsed = fallbackLabel,
+            fallbackTriggered = true,
+            description = redactError(combinedError),
+            anomalies = fallbackAnomalies
+        )
         return CollaborationAiOutcome(
             decision = null,
             primaryEngineLabel = primaryLabel,
@@ -359,7 +482,8 @@ class AIReplyEngine @Inject constructor(
         useFallbackEngine: Boolean,
         systemInstruction: String,
         recentTurns: List<ChatTurn>,
-        userMessage: String
+        userMessage: String,
+        traceId: String = DiagnosticTraceContext.newTraceId()
     ): RawTurnCallResult {
         if (!useFallbackEngine) {
             return when (settings.provider) {
@@ -388,7 +512,8 @@ class AIReplyEngine @Inject constructor(
                         userMessage = userMessage,
                         temperature = settings.temperature,
                         maxTokens = settings.maxTokens,
-                        requireApiKey = true
+                        requireApiKey = true,
+                        traceId = traceId
                     )
                 }
                 Provider.OPENAI -> {
@@ -408,7 +533,8 @@ class AIReplyEngine @Inject constructor(
                         userMessage = userMessage,
                         temperature = settings.temperature,
                         maxTokens = settings.maxTokens,
-                        requireApiKey = true
+                        requireApiKey = true,
+                        traceId = traceId
                     )
                 }
                 Provider.GEMINI -> {
@@ -434,7 +560,7 @@ class AIReplyEngine @Inject constructor(
                     )
                 }
                 Provider.OLLAMA -> {
-                    executeOllamaCall(settings, systemInstruction, recentTurns, userMessage)
+                    executeOllamaCall(settings, systemInstruction, recentTurns, userMessage, traceId)
                 }
             }
         } else {
@@ -464,10 +590,11 @@ class AIReplyEngine @Inject constructor(
                     userMessage = userMessage,
                     temperature = settings.temperature,
                     maxTokens = settings.maxTokens,
-                    requireApiKey = true
+                    requireApiKey = true,
+                    traceId = traceId
                 )
             }
-            return executeOllamaCall(settings, systemInstruction, recentTurns, userMessage)
+            return executeOllamaCall(settings, systemInstruction, recentTurns, userMessage, traceId)
         }
     }
 
@@ -475,7 +602,8 @@ class AIReplyEngine @Inject constructor(
         settings: AiSettingsState,
         systemInstruction: String,
         recentTurns: List<ChatTurn>,
-        userMessage: String
+        userMessage: String,
+        traceId: String = DiagnosticTraceContext.newTraceId()
     ): RawTurnCallResult {
         val rawUrl = settings.ollamaBaseUrl.trim()
         val urlCheck = validateOllamaEndpoint(rawUrl)
@@ -515,7 +643,8 @@ class AIReplyEngine @Inject constructor(
             turns = recentTurns,
             userMessage = userMessage,
             temperature = settings.temperature,
-            maxTokens = settings.maxTokens
+            maxTokens = settings.maxTokens,
+            traceId = traceId
         )
     }
 
@@ -602,7 +731,8 @@ class AIReplyEngine @Inject constructor(
         userMessage: String,
         temperature: Float,
         maxTokens: Int,
-        requireApiKey: Boolean
+        requireApiKey: Boolean,
+        traceId: String = DiagnosticTraceContext.newTraceId()
     ): RawTurnCallResult {
         if (requireApiKey && apiKey.isBlank()) {
             return RawTurnCallResult(
@@ -644,10 +774,9 @@ class AIReplyEngine @Inject constructor(
             put("max_tokens", JsonPrimitive(maxTokens.coerceIn(50, 1200)))
         }.toString()
 
-        val headers = if (apiKey.isNotBlank()) {
-            mapOf("Authorization" to "Bearer $apiKey")
-        } else {
-            emptyMap()
+        val headers = buildMap {
+            if (apiKey.isNotBlank()) put("Authorization", "Bearer $apiKey")
+            put(DiagnosticSanitizer.HEADER_TRACE_ID, traceId)
         }
 
         return when (
@@ -697,7 +826,8 @@ class AIReplyEngine @Inject constructor(
         turns: List<ChatTurn>,
         userMessage: String,
         temperature: Float,
-        maxTokens: Int
+        maxTokens: Int,
+        traceId: String = DiagnosticTraceContext.newTraceId()
     ): RawTurnCallResult {
         // OpenAI-compatible gateway URL if it ends with /chat/completions
         if (endpointUrl.endsWith("/chat/completions", ignoreCase = true)) {
@@ -710,7 +840,8 @@ class AIReplyEngine @Inject constructor(
                 userMessage = userMessage,
                 temperature = temperature,
                 maxTokens = maxTokens,
-                requireApiKey = false
+                requireApiKey = false,
+                traceId = traceId
             )
         }
 
@@ -745,10 +876,9 @@ class AIReplyEngine @Inject constructor(
             })
         }.toString()
 
-        val headers = if (apiKey.isNotBlank()) {
-            mapOf("Authorization" to "Bearer $apiKey")
-        } else {
-            emptyMap()
+        val headers = buildMap {
+            if (apiKey.isNotBlank()) put("Authorization", "Bearer $apiKey")
+            put(DiagnosticSanitizer.HEADER_TRACE_ID, traceId)
         }
 
         return when (

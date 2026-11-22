@@ -3,7 +3,12 @@ package com.example.network
 import com.example.data.local.entity.HeaderItem
 import com.example.data.local.entity.ServerConfigEntity
 import com.example.data.security.SmartAdvisorPrefs
+import com.example.engine.DiagnosticNetworkRecorder
+import com.example.engine.DiagnosticSanitizer
+import com.example.engine.DiagnosticStage
+import com.example.engine.DiagnosticTraceContext
 import com.example.engine.IncomingMessage
+import com.example.engine.SafeDiagnosticLogger
 import com.example.engine.VariableEngine
 import com.example.network.ResponseOutcomeAnalyzer.AnalyzedOutcome
 import com.example.network.ResponseOutcomeAnalyzer.ResponseStatus
@@ -20,7 +25,8 @@ import kotlinx.serialization.json.contentOrNull
 class WebhookClient(
     private val transport: HttpTransport,
     private val vault: SecretVault,
-    private val smartAdvisorPrefs: SmartAdvisorPrefs? = null
+    private val smartAdvisorPrefs: SmartAdvisorPrefs? = null,
+    private val diagnosticLogger: SafeDiagnosticLogger? = null
 ) {
     private val json = Json {
         ignoreUnknownKeys = true
@@ -42,7 +48,8 @@ class WebhookClient(
         val serverMessage: String = "",
         val errorCode: String? = null,
         val reasonSummary: String = "",
-        val guidance: String = ""
+        val guidance: String = "",
+        val traceId: String = ""
     )
 
     fun buildHeaders(config: ServerConfigEntity): Map<String, String> {
@@ -105,10 +112,21 @@ class WebhookClient(
     suspend fun send(
         config: ServerConfigEntity,
         msg: IncomingMessage,
-        idempotencyKey: String? = null
+        idempotencyKey: String? = null,
+        traceId: String = DiagnosticTraceContext.newTraceId()
     ): HttpTransport.Result {
+        val method = config.method.trim().uppercase().ifEmpty { "POST" }
         val authDecision = inspectOutboundAuth(config)
         if (authDecision is SmartAdvisorAuthResolver.OutboundAuthDecision.Blocked) {
+            DiagnosticNetworkRecorder.recordPreSendBlocked(
+                logger = diagnosticLogger,
+                traceId = traceId,
+                operationType = "webhook_send",
+                method = method,
+                rawUrl = config.url,
+                errorCode = authDecision.errorCode,
+                reasonAr = authDecision.reasonAr
+            )
             return HttpTransport.Result.Failure(
                 error = authDecision.reasonAr,
                 code = if (authDecision.errorCode == "sa_missing_key_client") 401 else -1,
@@ -118,17 +136,18 @@ class WebhookClient(
             )
         }
         val proceed = authDecision as SmartAdvisorAuthResolver.OutboundAuthDecision.Proceed
-        val method = config.method.trim().uppercase().ifEmpty { "POST" }
+        recordAttachedAuthHeaders(proceed.headers, traceId, "webhook_send", method, config.url)
+        val headersWithTrace = proceed.headers + (DiagnosticSanitizer.HEADER_TRACE_ID to traceId)
         val body = if (method == "GET" || method == "HEAD") {
             null
         } else {
             buildBody(config, msg)
         }
 
-        return transport.execute(
+        val result = transport.execute(
             url = config.url,
             method = method,
-            headers = proceed.headers,
+            headers = headersWithTrace,
             body = body,
             contentType = config.contentType,
             maxAttempts = config.retryCount.coerceIn(1, HttpTransport.MAX_ALLOWED_ATTEMPTS),
@@ -138,19 +157,42 @@ class WebhookClient(
             ),
             idempotencyKey = idempotencyKey
         )
+        DiagnosticNetworkRecorder.recordHttpResult(
+            logger = diagnosticLogger,
+            traceId = traceId,
+            operationType = "webhook_send",
+            method = method,
+            rawUrl = config.url,
+            result = result,
+            defaultStage = DiagnosticStage.STAGE_09_ENGINE_RESPONSE_RECEIVED,
+            extraSecretsToRedact = extractHeaderSecrets(proceed.headers, config.headersJson),
+            expectReplyPayload = true
+        )
+        return result
     }
 
     suspend fun testWebhook(
         config: ServerConfigEntity,
         msg: IncomingMessage,
-        idempotencyKey: String? = null
+        idempotencyKey: String? = null,
+        traceId: String = DiagnosticTraceContext.newTraceId()
     ): AnalyzedOutcome {
+        val method = config.method.trim().uppercase().ifEmpty { "POST" }
         val authDecision = inspectOutboundAuth(config)
         val isSaTarget = SmartAdvisorAuthResolver.isSmartAdvisorUrl(config.url)
         val sourceLabel = if (isSaTarget) SOURCE_SMART_ADVISOR_ENDPOINT else SOURCE_EXTERNAL_WEBHOOK
         val trustLabel = if (isSaTarget) "Smart Advisor عبر HTTPS" else "خارجي غير متحقق منه"
 
         if (authDecision is SmartAdvisorAuthResolver.OutboundAuthDecision.Blocked) {
+            DiagnosticNetworkRecorder.recordPreSendBlocked(
+                logger = diagnosticLogger,
+                traceId = traceId,
+                operationType = "webhook_test",
+                method = method,
+                rawUrl = config.url,
+                errorCode = authDecision.errorCode,
+                reasonAr = authDecision.reasonAr
+            )
             return ResponseOutcomeAnalyzer.fromBlockedAuth(
                 errorCode = authDecision.errorCode,
                 reasonAr = authDecision.reasonAr,
@@ -161,7 +203,8 @@ class WebhookClient(
         }
 
         val proceed = authDecision as SmartAdvisorAuthResolver.OutboundAuthDecision.Proceed
-        val method = config.method.trim().uppercase().ifEmpty { "POST" }
+        recordAttachedAuthHeaders(proceed.headers, traceId, "webhook_test", method, config.url)
+        val headersWithTrace = proceed.headers + (DiagnosticSanitizer.HEADER_TRACE_ID to traceId)
         val body = if (method == "GET" || method == "HEAD") {
             null
         } else {
@@ -171,7 +214,7 @@ class WebhookClient(
         val result = transport.execute(
             url = config.url,
             method = method,
-            headers = proceed.headers,
+            headers = headersWithTrace,
             body = body,
             contentType = config.contentType,
             maxAttempts = config.retryCount.coerceIn(1, HttpTransport.MAX_ALLOWED_ATTEMPTS),
@@ -182,7 +225,8 @@ class WebhookClient(
             idempotencyKey = idempotencyKey
         )
 
-        return ResponseOutcomeAnalyzer.analyze(
+        val extraSecrets = extractHeaderSecrets(proceed.headers, config.headersJson)
+        val analyzed = ResponseOutcomeAnalyzer.analyze(
             result = result,
             vault = vault,
             replyKey = config.responseReplyKey,
@@ -191,8 +235,20 @@ class WebhookClient(
             isToolPreview = false,
             sourceLabel = sourceLabel,
             trustLabel = trustLabel,
-            extraSecretsToRedact = extractHeaderSecrets(proceed.headers, config.headersJson)
+            extraSecretsToRedact = extraSecrets
         )
+        DiagnosticNetworkRecorder.recordHttpResult(
+            logger = diagnosticLogger,
+            traceId = traceId,
+            operationType = "webhook_test",
+            method = method,
+            rawUrl = config.url,
+            result = result,
+            defaultStage = DiagnosticStage.STAGE_09_ENGINE_RESPONSE_RECEIVED,
+            analyzedOutcome = analyzed,
+            extraSecretsToRedact = extraSecrets
+        )
+        return analyzed
     }
 
     suspend fun invokeAsAiTool(
@@ -200,14 +256,25 @@ class WebhookClient(
         msg: IncomingMessage,
         aiQuery: String,
         idempotencyKey: String? = null,
-        reason: String = ""
+        reason: String = "",
+        traceId: String = DiagnosticTraceContext.newTraceId()
     ): WebhookToolResult {
         val cleanUrl = config.url.trim()
+        val method = config.method.trim().uppercase().ifEmpty { "POST" }
         val isSaTarget = SmartAdvisorAuthResolver.isSmartAdvisorUrl(cleanUrl)
         val sourceLabel = if (isSaTarget) SOURCE_SMART_ADVISOR_ENDPOINT else SOURCE_EXTERNAL_WEBHOOK
         val trustLevel = if (isSaTarget) TRUST_SMART_ADVISOR_AUTH else TRUST_UNVERIFIED_EXTERNAL
 
         if (cleanUrl.isBlank()) {
+            DiagnosticNetworkRecorder.recordPreSendBlocked(
+                logger = diagnosticLogger,
+                traceId = traceId,
+                operationType = "webhook_ai_tool",
+                method = method,
+                rawUrl = cleanUrl,
+                errorCode = "missing_url",
+                reasonAr = "رابط خادم Webhook غير مهيأ"
+            )
             return WebhookToolResult(
                 ok = false,
                 statusCode = -1,
@@ -219,12 +286,22 @@ class WebhookClient(
                 serverMessage = "رابط خادم Webhook غير مهيأ.",
                 errorCode = "missing_url",
                 reasonSummary = "لم يتم إدخال عنوان HTTPS للخادم.",
-                guidance = "أدخل رابط الخادم الصحيح ثم أعد الاختبار."
+                guidance = "أدخل رابط الخادم الصحيح ثم أعد الاختبار.",
+                traceId = traceId
             )
         }
 
         val authDecision = inspectOutboundAuth(config)
         if (authDecision is SmartAdvisorAuthResolver.OutboundAuthDecision.Blocked) {
+            DiagnosticNetworkRecorder.recordPreSendBlocked(
+                logger = diagnosticLogger,
+                traceId = traceId,
+                operationType = "webhook_ai_tool",
+                method = method,
+                rawUrl = cleanUrl,
+                errorCode = authDecision.errorCode,
+                reasonAr = authDecision.reasonAr
+            )
             return WebhookToolResult(
                 ok = false,
                 statusCode = -1,
@@ -240,12 +317,14 @@ class WebhookClient(
                 serverMessage = authDecision.reasonAr,
                 errorCode = authDecision.errorCode,
                 reasonSummary = authDecision.reasonAr,
-                guidance = authDecision.guidanceAr
+                guidance = authDecision.guidanceAr,
+                traceId = traceId
             )
         }
 
         val proceed = authDecision as SmartAdvisorAuthResolver.OutboundAuthDecision.Proceed
-        val method = config.method.trim().uppercase().ifEmpty { "POST" }
+        recordAttachedAuthHeaders(proceed.headers, traceId, "webhook_ai_tool", method, cleanUrl)
+        val headersWithTrace = proceed.headers + (DiagnosticSanitizer.HEADER_TRACE_ID to traceId)
         val body = if (method == "GET" || method == "HEAD") {
             null
         } else {
@@ -255,7 +334,7 @@ class WebhookClient(
         val result = transport.execute(
             url = cleanUrl,
             method = method,
-            headers = proceed.headers,
+            headers = headersWithTrace,
             body = body,
             contentType = config.contentType,
             maxAttempts = config.retryCount.coerceIn(1, HttpTransport.MAX_ALLOWED_ATTEMPTS),
@@ -267,6 +346,7 @@ class WebhookClient(
         )
 
         val maxChars = config.toolMaxResponseChars.coerceIn(MIN_TOOL_CHARS, MAX_TOOL_CHARS)
+        val extraSecrets = extractHeaderSecrets(proceed.headers, config.headersJson)
         val analyzed = ResponseOutcomeAnalyzer.analyze(
             result = result,
             vault = vault,
@@ -276,7 +356,19 @@ class WebhookClient(
             isToolPreview = true,
             sourceLabel = sourceLabel,
             trustLabel = if (isSaTarget) "Smart Advisor عبر HTTPS" else "خارجي غير متحقق منه",
-            extraSecretsToRedact = extractHeaderSecrets(proceed.headers, config.headersJson)
+            extraSecretsToRedact = extraSecrets
+        )
+        DiagnosticNetworkRecorder.recordHttpResult(
+            logger = diagnosticLogger,
+            traceId = traceId,
+            operationType = "webhook_ai_tool",
+            method = method,
+            rawUrl = cleanUrl,
+            result = result,
+            defaultStage = DiagnosticStage.STAGE_09_ENGINE_RESPONSE_RECEIVED,
+            analyzedOutcome = analyzed,
+            extraSecretsToRedact = extraSecrets,
+            expectReplyPayload = true
         )
 
         return WebhookToolResult(
@@ -294,8 +386,32 @@ class WebhookClient(
             serverMessage = analyzed.serverMessage,
             errorCode = analyzed.errorCode,
             reasonSummary = analyzed.reasonSummary,
-            guidance = analyzed.guidance
+            guidance = analyzed.guidance,
+            traceId = traceId
         )
+    }
+
+    private fun recordAttachedAuthHeaders(
+        headers: Map<String, String>,
+        traceId: String,
+        operationType: String,
+        method: String,
+        url: String
+    ) {
+        val attachedName = headers.keys.firstOrNull {
+            it.equals("X-SA-API-Key", ignoreCase = true) ||
+                it.equals("Authorization", ignoreCase = true)
+        }
+        if (attachedName != null) {
+            DiagnosticNetworkRecorder.recordHeaderAttached(
+                logger = diagnosticLogger,
+                traceId = traceId,
+                operationType = operationType,
+                method = method,
+                rawUrl = url,
+                headerName = attachedName
+            )
+        }
     }
 
     private fun extractHeaderSecrets(headers: Map<String, String>, headersJson: String = ""): List<String> {

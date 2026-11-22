@@ -29,10 +29,13 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.AccessibilityNew
 import androidx.compose.material.icons.filled.Apps
+import androidx.compose.material.icons.filled.BugReport
+import androidx.compose.material.icons.filled.DeleteSweep
 import androidx.compose.material.icons.filled.DirectionsCar
 import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.Fingerprint
 import androidx.compose.material.icons.filled.Groups
+import androidx.compose.material.icons.filled.MonitorHeart
 import androidx.compose.material.icons.filled.People
 import androidx.compose.material.icons.filled.Schedule
 import androidx.compose.material.icons.filled.Timer
@@ -94,7 +97,12 @@ fun SettingsScreen(
     onImportJson: (Uri, Boolean) -> Unit,
     modifier: Modifier = Modifier,
     isBiometricAvailable: Boolean = false,
-    onSetBiometricLock: (Boolean) -> Unit = {}
+    onSetBiometricLock: (Boolean) -> Unit = {},
+    diagnosticEventsCount: Int = 0,
+    diagnosticErrorsCount: Int = 0,
+    onSetDiagnosticLogging: (Boolean) -> Unit = {},
+    onNavigateToDiagnostics: () -> Unit = {},
+    onClearDiagnosticLogs: () -> Unit = {}
 ) {
     var pickingStartTime by remember { mutableStateOf(false) }
     var pickingEndTime by remember { mutableStateOf(false) }
@@ -587,6 +595,106 @@ fun SettingsScreen(
                             Spacer(modifier = Modifier.width(6.dp))
                             Text("استيراد", maxLines = 1, overflow = TextOverflow.Ellipsis)
                         }
+                    }
+                }
+            }
+
+            // 8. Dedicated Diagnostics & Error Logging Section (Settings ONLY)
+            item {
+                SettingsSectionCard(title = "التشخيص وسجل الأخطاء") {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(10.dp),
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Filled.MonitorHeart,
+                                contentDescription = "تفعيل التسجيل التشخيصي التفصيلي",
+                                tint = MaterialTheme.colorScheme.primary
+                            )
+                            Column {
+                                Text(
+                                    text = "تفعيل التسجيل التشخيصي التفصيلي",
+                                    style = MaterialTheme.typography.titleMedium
+                                )
+                                Text(
+                                    text = "يسجل جميع مراحل المعالجة والمحركات (بحد أقصى 100 حدث مشفر)، بينما تُحفظ الأخطاء الحرجة دائماً.",
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                        }
+                        Switch(
+                            checked = settings.diagnosticLoggingEnabled,
+                            onCheckedChange = onSetDiagnosticLogging,
+                            modifier = Modifier.testTag("diagnostic_logging_switch")
+                        )
+                    }
+
+                    HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.25f))
+
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .minimumInteractiveComponentSize()
+                            .clickable(onClick = onNavigateToDiagnostics)
+                            .padding(vertical = 8.dp)
+                            .testTag("open_diagnostics_row"),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(12.dp),
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Filled.BugReport,
+                                contentDescription = "سجل التشخيص والأخطاء",
+                                tint = if (diagnosticErrorsCount > 0) {
+                                    MaterialTheme.colorScheme.error
+                                } else {
+                                    MaterialTheme.colorScheme.secondary
+                                }
+                            )
+                            Column {
+                                Text(
+                                    text = "سجل التشخيص والأخطاء",
+                                    style = MaterialTheme.typography.titleMedium
+                                )
+                                Text(
+                                    text = "$diagnosticEventsCount حدث مسجل • $diagnosticErrorsCount خطأ أو تحذير",
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                        }
+                        Icon(
+                            imageVector = Icons.AutoMirrored.Filled.KeyboardArrowRight,
+                            contentDescription = "فتح سجل التشخيص والأخطاء"
+                        )
+                    }
+
+                    OutlinedButton(
+                        onClick = onClearDiagnosticLogs,
+                        enabled = diagnosticEventsCount > 0,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .minimumInteractiveComponentSize()
+                            .testTag("clear_diagnostics_btn")
+                    ) {
+                        Icon(
+                            imageVector = Icons.Filled.DeleteSweep,
+                            contentDescription = "مسح سجل التشخيص",
+                            modifier = Modifier.size(18.dp)
+                        )
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text("مسح سجل التشخيص")
                     }
                 }
             }

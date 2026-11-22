@@ -73,10 +73,42 @@ class UnifiedReplyTester internal constructor(
     private val conversationMemoryManager: ConversationMemoryManager? = null,
     private val smartCollaborationCoordinator: SmartCollaborationCoordinator? = null,
     private val clockMs: () -> Long = { System.currentTimeMillis() },
-    private val injectedUnifiedService: UnifiedSmartReplyService? = null
+    private val injectedUnifiedService: UnifiedSmartReplyService? = null,
+    private val diagnosticLogger: SafeDiagnosticLogger = SafeDiagnosticLogger(secretVault, clockMs)
 ) {
     @Inject
     constructor(
+        repository: AutoMateRepository,
+        menuReplyManager: MenuReplyManager,
+        aiSettingsPrefs: AiSettingsPrefs,
+        aiReplyEngine: AIReplyEngine,
+        secretVault: SecretVault,
+        serverRepo: ServerConfigRepository,
+        webhookClient: WebhookClient,
+        smartAdvisorClient: SmartAdvisorClient,
+        smartAdvisorPrefs: SmartAdvisorPrefs,
+        conversationMemoryManager: ConversationMemoryManager,
+        smartCollaborationCoordinator: SmartCollaborationCoordinator,
+        unifiedSmartReplyService: UnifiedSmartReplyService,
+        diagnosticLogger: SafeDiagnosticLogger
+    ) : this(
+        repository = repository,
+        menuReplyManager = menuReplyManager,
+        aiSettingsPrefs = aiSettingsPrefs,
+        aiReplyEngine = aiReplyEngine,
+        secretVault = secretVault,
+        serverRepo = serverRepo,
+        webhookClient = webhookClient,
+        smartAdvisorClient = smartAdvisorClient,
+        smartAdvisorPrefs = smartAdvisorPrefs,
+        conversationMemoryManager = conversationMemoryManager,
+        smartCollaborationCoordinator = smartCollaborationCoordinator,
+        clockMs = { System.currentTimeMillis() },
+        injectedUnifiedService = unifiedSmartReplyService,
+        diagnosticLogger = diagnosticLogger
+    )
+
+    internal constructor(
         repository: AutoMateRepository,
         menuReplyManager: MenuReplyManager,
         aiSettingsPrefs: AiSettingsPrefs,
@@ -204,6 +236,35 @@ class UnifiedReplyTester internal constructor(
                 receivedAtMs = now
             )
         )
+
+        if (decision.matched && (decision.usedSmartCollaboration || decision.calledSmartAdvisor || decision.calledWebhook)) {
+            if (decision.displayReplyText.isBlank()) {
+                diagnosticLogger.logTrace(
+                    traceId = decision.traceId.ifBlank { DiagnosticTraceContext.newTraceId() },
+                    operationType = "sandbox_ui_render",
+                    stage = DiagnosticStage.STAGE_12_REPLY_DISPLAYED_TO_USER,
+                    outcome = DiagnosticOutcome.FAILURE,
+                    category = DiagnosticCategory.REPLY_ANOMALY,
+                    errorCode = "reply_not_displayed_in_ui",
+                    engineUsed = decision.activeEngineLabel,
+                    fallbackTriggered = decision.switchedToQwen,
+                    description = "وصل الرد للتطبيق في بيئة الاختبار ولكن نص العرض كان فارغاً",
+                    anomalies = listOf(DiagnosticAnomaly.REPLY_NOT_DISPLAYED_IN_UI)
+                )
+            } else {
+                diagnosticLogger.logTrace(
+                    traceId = decision.traceId.ifBlank { DiagnosticTraceContext.newTraceId() },
+                    operationType = "sandbox_ui_render",
+                    stage = DiagnosticStage.STAGE_12_REPLY_DISPLAYED_TO_USER,
+                    outcome = DiagnosticOutcome.SUCCESS,
+                    category = DiagnosticCategory.STAGE_PIPELINE,
+                    engineUsed = decision.activeEngineLabel,
+                    fallbackTriggered = decision.switchedToQwen,
+                    description = "تم عرض الرد في شاشة اختبار الردود بنجاح",
+                    isVerboseStep = true
+                )
+            }
+        }
 
         return UnifiedTestResult(
             matched = decision.matched,

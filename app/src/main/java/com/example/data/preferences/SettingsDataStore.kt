@@ -55,7 +55,8 @@ data class AutoMateSettings(
         SupportedMessagingApp.MESSENGER.packageName
     ),
     val useAccessibilityFallback: Boolean = true,
-    val isBiometricLockEnabled: Boolean = false
+    val isBiometricLockEnabled: Boolean = false,
+    val diagnosticLoggingEnabled: Boolean = false
 )
 
 @Singleton
@@ -79,6 +80,7 @@ class SettingsDataStore @Inject constructor(
         val ENABLED_PACKAGES = stringSetPreferencesKey("enabled_packages")
         val USE_ACCESSIBILITY_FALLBACK = booleanPreferencesKey("use_accessibility_fallback")
         val BIOMETRIC_LOCK_ENABLED = booleanPreferencesKey("biometric_lock_enabled")
+        val DIAGNOSTIC_LOGGING_ENABLED = booleanPreferencesKey("diagnostic_logging_enabled")
     }
 
     val settingsFlow: Flow<AutoMateSettings> = context.autoMateDataStore.data.map { prefs ->
@@ -106,7 +108,8 @@ class SettingsDataStore @Inject constructor(
                 SupportedMessagingApp.MESSENGER.packageName
             ),
             useAccessibilityFallback = prefs[Keys.USE_ACCESSIBILITY_FALLBACK] ?: true,
-            isBiometricLockEnabled = prefs[Keys.BIOMETRIC_LOCK_ENABLED] ?: false
+            isBiometricLockEnabled = prefs[Keys.BIOMETRIC_LOCK_ENABLED] ?: false,
+            diagnosticLoggingEnabled = prefs[Keys.DIAGNOSTIC_LOGGING_ENABLED] ?: false
         )
     }
 
@@ -183,5 +186,9 @@ class SettingsDataStore @Inject constructor(
 
     suspend fun setBiometricLockEnabled(enabled: Boolean) {
         context.autoMateDataStore.edit { it[Keys.BIOMETRIC_LOCK_ENABLED] = enabled }
+    }
+
+    suspend fun setDiagnosticLoggingEnabled(enabled: Boolean) {
+        context.autoMateDataStore.edit { it[Keys.DIAGNOSTIC_LOGGING_ENABLED] = enabled }
     }
 }

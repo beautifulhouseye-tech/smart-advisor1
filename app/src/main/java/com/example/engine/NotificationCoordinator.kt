@@ -198,6 +198,16 @@ class NotificationCoordinator internal constructor(
             (now - recentEcho.timestampMs) <= ECHO_WINDOW_MS &&
             recentEcho.normalizedText == normalizedIncoming
         ) {
+            diagnosticLogger?.logTrace(
+                traceId = DiagnosticTraceContext.newTraceId(),
+                operationType = "duplicate_echo_guard",
+                stage = DiagnosticStage.STAGE_01_USER_MESSAGE_SENT,
+                outcome = DiagnosticOutcome.UNKNOWN,
+                category = DiagnosticCategory.REPLY_ANOMALY,
+                errorCode = "echo_message_blocked",
+                description = "تم حجب إشعار مطابق لصدى رد أُرسل حديثاً",
+                anomalies = listOf(DiagnosticAnomaly.DUPLICATE_MESSAGE_OR_REPLY)
+            )
             recordSkip(payload, msgKey, convKey, MessageQueueWorker.STATUS_SKIPPED_SELF, "تجاهل صدى رد سابق", now)
             return CoordinatorResult(msgKey, MessageQueueWorker.STATUS_SKIPPED_SELF)
         }
@@ -263,6 +273,16 @@ class NotificationCoordinator internal constructor(
                 detectedStatus = MessageProcessingStatus.DUPLICATE_MESSAGE.name,
                 decision = "IDEMPOTENCY_RESERVATION_DENIED",
                 errorSource = "IdempotencyGuard"
+            )
+            diagnosticLogger?.logTrace(
+                traceId = DiagnosticTraceContext.newTraceId(),
+                operationType = "duplicate_idempotency_guard",
+                stage = DiagnosticStage.STAGE_01_USER_MESSAGE_SENT,
+                outcome = DiagnosticOutcome.UNKNOWN,
+                category = DiagnosticCategory.REPLY_ANOMALY,
+                errorCode = "duplicate_message_blocked",
+                description = "تم حجب رسالة مكررة أو قيد المعالجة مسبقاً عبر IdempotencyGuard",
+                anomalies = listOf(DiagnosticAnomaly.DUPLICATE_MESSAGE_OR_REPLY)
             )
             recordSkip(payload, msgKey, convKey, MessageQueueWorker.STATUS_SKIPPED_DEDUP, "رسالة مكررة أو قيد المعالجة", now)
             return CoordinatorResult(msgKey, MessageQueueWorker.STATUS_SKIPPED_DEDUP)
@@ -382,18 +402,21 @@ class NotificationCoordinator internal constructor(
             timestamp = now
         )
 
+        val externalTraceId = DiagnosticTraceContext.newTraceId()
         val result = when {
             webhookEnabled && serverConfig != null -> webhookClient.send(
                 config = serverConfig,
                 msg = msg,
-                idempotencyKey = msgKey
+                idempotencyKey = msgKey,
+                traceId = externalTraceId
             )
             saEnabled -> {
                 val excludeIds = conversationMemoryManager?.getShownProductIds(convKey).orEmpty()
                 smartAdvisorClient.send(
                     msg = msg,
                     idempotencyKey = msgKey,
-                    excludeProductIds = excludeIds
+                    excludeProductIds = excludeIds,
+                    traceId = externalTraceId
                 )
             }
             else -> {
@@ -484,6 +507,15 @@ class NotificationCoordinator internal constructor(
                     }
                     when (sendOutcome) {
                         is ReplyDispatcher.SendOutcome.Sent -> {
+                            diagnosticLogger?.logTrace(
+                                traceId = externalTraceId,
+                                operationType = "external_reply_dispatch",
+                                stage = DiagnosticStage.STAGE_12_REPLY_DISPLAYED_TO_USER,
+                                outcome = DiagnosticOutcome.SUCCESS,
+                                category = DiagnosticCategory.STAGE_PIPELINE,
+                                description = "تم إرسال الرد الخارجي للمستخدم عبر ${sendOutcome.deliveryMethod}",
+                                isVerboseStep = true
+                            )
                             recordOutgoingReplyByKey(convKey, loggedReply)
                             if (!sendOutcome.isHandoff) {
                                 idempotencyGuard.markCompleted(msgKey)
@@ -509,6 +541,16 @@ class NotificationCoordinator internal constructor(
                             CoordinatorResult(msgKey, sendOutcome.deliveryMethod, loggedReply, isHandled = true)
                         }
                         is ReplyDispatcher.SendOutcome.FailedConfirmed -> {
+                            diagnosticLogger?.logTrace(
+                                traceId = externalTraceId,
+                                operationType = "external_reply_dispatch",
+                                stage = DiagnosticStage.STAGE_12_REPLY_DISPLAYED_TO_USER,
+                                outcome = DiagnosticOutcome.FAILURE,
+                                category = DiagnosticCategory.REPLY_ANOMALY,
+                                errorCode = "reply_not_displayed_in_ui",
+                                description = "وصل الرد من الخادم ولم يظهر/يُرسل للمستخدم: ${sendOutcome.error}",
+                                anomalies = listOf(DiagnosticAnomaly.REPLY_NOT_DISPLAYED_IN_UI)
+                            )
                             idempotencyGuard.markFailedConfirmed(msgKey)
                             repository.recordReplyLog(
                                 ReplyLogEntity(
@@ -526,6 +568,16 @@ class NotificationCoordinator internal constructor(
                             CoordinatorResult(msgKey, MessageQueueWorker.STATUS_FAILED_CONFIRMED)
                         }
                         is ReplyDispatcher.SendOutcome.DeliveryUnknown -> {
+                            diagnosticLogger?.logTrace(
+                                traceId = externalTraceId,
+                                operationType = "external_reply_dispatch",
+                                stage = DiagnosticStage.STAGE_12_REPLY_DISPLAYED_TO_USER,
+                                outcome = DiagnosticOutcome.UNKNOWN,
+                                category = DiagnosticCategory.REPLY_ANOMALY,
+                                errorCode = "reply_delivery_unknown",
+                                description = "حالة عرض الرد الخارجي للمستخدم غير مؤكدة: ${sendOutcome.error}",
+                                anomalies = listOf(DiagnosticAnomaly.REPLY_NOT_DISPLAYED_IN_UI)
+                            )
                             idempotencyGuard.markDeliveryUnknown(msgKey)
                             repository.recordReplyLog(
                                 ReplyLogEntity(

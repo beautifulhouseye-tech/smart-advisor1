@@ -3,6 +3,9 @@ package com.example.ui.viewmodel
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.data.security.SmartAdvisorPrefs
+import com.example.engine.DiagnosticNetworkRecorder
+import com.example.engine.DiagnosticTraceContext
+import com.example.engine.SafeDiagnosticLogger
 import com.example.network.ResponseOutcomeAnalyzer
 import com.example.network.ResponseOutcomeAnalyzer.ResponseStatus
 import com.example.network.security.SecretVault
@@ -20,8 +23,14 @@ import javax.inject.Inject
 class SaSettingsViewModel @Inject constructor(
     private val prefs: SmartAdvisorPrefs,
     private val client: SmartAdvisorClient,
-    private val vault: SecretVault
+    private val vault: SecretVault,
+    private val diagnosticLogger: SafeDiagnosticLogger? = null
 ) : ViewModel() {
+    constructor(
+        prefs: SmartAdvisorPrefs,
+        client: SmartAdvisorClient,
+        vault: SecretVault
+    ) : this(prefs = prefs, client = client, vault = vault, diagnosticLogger = null)
 
     private val _baseUrl = MutableStateFlow(prefs.baseUrl.ifBlank { SmartAdvisorPrefs.DEFAULT_BASE_URL })
     val baseUrl: StateFlow<String> = _baseUrl.asStateFlow()
@@ -173,8 +182,19 @@ class SaSettingsViewModel @Inject constructor(
                 enabled = _enabled.value
             )
 
+            val traceId = DiagnosticTraceContext.newTraceId()
+
             // Preflight HTTPS validation
             if (!effectiveUrl.startsWith("https://", ignoreCase = true)) {
+                DiagnosticNetworkRecorder.recordPreSendBlocked(
+                    logger = diagnosticLogger,
+                    traceId = traceId,
+                    operationType = "sa_connection_test",
+                    method = "POST",
+                    rawUrl = effectiveUrl,
+                    errorCode = "insecure_transport",
+                    reasonAr = "يتطلب Smart Advisor استخدام رابط HTTPS مشفر لحماية مفتاح API."
+                )
                 val blocked = ResponseOutcomeAnalyzer.fromBlockedAuth(
                     errorCode = "insecure_transport",
                     reasonAr = "يتطلب Smart Advisor استخدام رابط HTTPS مشفر لحماية مفتاح API.",
@@ -200,6 +220,15 @@ class SaSettingsViewModel @Inject constructor(
 
             // Preflight API Key check: prevent sending unauthenticated request that mimics completion
             if (!hasStoredApiKey()) {
+                DiagnosticNetworkRecorder.recordPreSendBlocked(
+                    logger = diagnosticLogger,
+                    traceId = traceId,
+                    operationType = "sa_connection_test",
+                    method = "POST",
+                    rawUrl = effectiveUrl,
+                    errorCode = "sa_missing_key_client",
+                    reasonAr = "مفتاح API غير مضبوط في التطبيق (X-SA-API-Key)."
+                )
                 val blocked = ResponseOutcomeAnalyzer.fromBlockedAuth(
                     errorCode = "sa_missing_key_client",
                     reasonAr = "مفتاح API غير مضبوط في التطبيق (X-SA-API-Key).",
@@ -223,7 +252,7 @@ class SaSettingsViewModel @Inject constructor(
                 return@launch
             }
 
-            val result = client.test()
+            val result = client.test(traceId = traceId)
             val analyzed = ResponseOutcomeAnalyzer.analyze(
                 result = result,
                 vault = vault,

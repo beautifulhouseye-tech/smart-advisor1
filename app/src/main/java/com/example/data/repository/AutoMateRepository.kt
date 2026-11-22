@@ -264,6 +264,9 @@ class AutoMateRepository @Inject constructor(
     suspend fun setBiometricLockEnabled(enabled: Boolean) =
         settingsDataStore.setBiometricLockEnabled(enabled)
 
+    suspend fun setDiagnosticLoggingEnabled(enabled: Boolean) =
+        settingsDataStore.setDiagnosticLoggingEnabled(enabled)
+
     // Local JSON Backup
     suspend fun exportBackup(uri: Uri): Result<Int> {
         val rules = replyRuleDao.getAllRulesOnce()

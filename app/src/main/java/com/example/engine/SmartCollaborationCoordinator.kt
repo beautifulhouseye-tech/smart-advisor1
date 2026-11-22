@@ -127,7 +127,8 @@ class SmartCollaborationCoordinator(
         val fallbackTextReply: String = "",
         val processingClassification: MessageProcessingClassification? = null,
         val suppressedByUnknownIntent: Boolean = false,
-        val engineFailureCategory: EngineFailureCategory = EngineFailureCategory.NONE
+        val engineFailureCategory: EngineFailureCategory = EngineFailureCategory.NONE,
+        val traceId: String = ""
     )
 
     private data class CollectedToolNote(
@@ -140,6 +141,7 @@ class SmartCollaborationCoordinator(
     )
 
     suspend fun collaborate(input: CollaborationInput): CollaborationOutcome {
+        val traceId = DiagnosticTraceContext.newTraceId()
         val aiSettings = aiSettingsPrefs.current()
         val conversationKey = input.conversationKeyOverride?.takeIf { it.isNotBlank() }
             ?: ConversationKey.build(
@@ -149,6 +151,16 @@ class SmartCollaborationCoordinator(
                 groupName = input.groupName,
                 isGroup = input.isGroup
             )
+
+        diagnosticLogger.logTrace(
+            traceId = traceId,
+            operationType = "smart_collaboration",
+            stage = DiagnosticStage.STAGE_01_USER_MESSAGE_SENT,
+            outcome = DiagnosticOutcome.SUCCESS,
+            category = DiagnosticCategory.STAGE_PIPELINE,
+            description = "بدء معالجة رسالة جديدة في المحادثة",
+            isVerboseStep = true
+        )
 
         val latencies = linkedMapOf<String, Long>()
         val memoryStart = clockMs()
@@ -182,7 +194,7 @@ class SmartCollaborationCoordinator(
 
         if (saAvailable) {
             val capStart = clockMs()
-            capabilities = smartAdvisorClient.fetchCapabilities()
+            capabilities = smartAdvisorClient.fetchCapabilities(traceId = traceId)
             latencies["sa_capabilities"] = (clockMs() - capStart).coerceAtLeast(0L)
 
             if (aiSettings.useConversationContext &&
@@ -195,7 +207,8 @@ class SmartCollaborationCoordinator(
                 val memLoadStart = clockMs()
                 val memRes = smartAdvisorClient.getCustomerMemory(
                     customerKey = contextEntity.customerKey,
-                    phone = input.phone
+                    phone = input.phone,
+                    traceId = traceId
                 )
                 latencies["sa_memory_get"] = (clockMs() - memLoadStart).coerceAtLeast(0L)
                 if (memRes.ok && memRes.memory != null) {
@@ -209,6 +222,15 @@ class SmartCollaborationCoordinator(
                             isSandbox = input.isSandbox
                         )
                     }
+                    diagnosticLogger.logTrace(
+                        traceId = traceId,
+                        operationType = "smart_collaboration_memory",
+                        stage = DiagnosticStage.STAGE_05_CONTEXT_MEMORY_LOADED,
+                        outcome = DiagnosticOutcome.SUCCESS,
+                        category = DiagnosticCategory.MEMORY_CONTEXT,
+                        description = "تم استرجاع ذاكرة العميل من Smart Advisor",
+                        isVerboseStep = true
+                    )
                 }
             }
         }
@@ -220,6 +242,18 @@ class SmartCollaborationCoordinator(
             )
         } else {
             emptyList()
+        }
+        if (aiSettings.useConversationContext && recentTurns.isEmpty() && contextEntity.turnsJson != "[]" && contextEntity.turnsJson.length > 4) {
+            diagnosticLogger.logTrace(
+                traceId = traceId,
+                operationType = "smart_collaboration_context",
+                stage = DiagnosticStage.STAGE_05_CONTEXT_MEMORY_LOADED,
+                outcome = DiagnosticOutcome.FAILURE,
+                category = DiagnosticCategory.MEMORY_CONTEXT,
+                errorCode = "context_lost",
+                description = "تعذر تحميل أدوار السياق السابقة رغم وجود سجل محادثة",
+                anomalies = listOf(DiagnosticAnomaly.CONTEXT_LOST)
+            )
         }
         val localContextBlock = if (aiSettings.useConversationContext) {
             conversationMemoryManager.buildContextSummaryBlock(contextEntity)
@@ -243,7 +277,8 @@ class SmartCollaborationCoordinator(
             settings = aiSettings,
             userMessage = input.messageText,
             systemInstruction = pass1SystemPrompt,
-            recentTurns = recentTurns
+            recentTurns = recentTurns,
+            traceId = traceId
         )
         latencies["ai_primary"] = pass1Outcome.primaryLatencyMs
         if (pass1Outcome.switchedToFallback && pass1Outcome.fallbackLatencyMs > 0L) {
@@ -299,7 +334,8 @@ class SmartCollaborationCoordinator(
                     failureReason = errorMsg
                 ),
                 suppressedByUnknownIntent = false,
-                engineFailureCategory = failureCat
+                engineFailureCategory = failureCat,
+                traceId = traceId
             )
         }
 
@@ -338,6 +374,24 @@ class SmartCollaborationCoordinator(
                 status = ununderstoodStatus,
                 suppressForLoop = suppressForLoop
             )
+            val intentAnomalies = buildList {
+                if (suppressForLoop) add(DiagnosticAnomaly.REPLY_LOOP_DETECTED)
+                if (resolvedUnunderstoodReply.isNullOrBlank() && !aiSettings.suppressReplyWhenUnunderstood) {
+                    add(DiagnosticAnomaly.EMPTY_REPLY)
+                }
+            }
+            diagnosticLogger.logTrace(
+                traceId = traceId,
+                operationType = "intent_classification",
+                stage = DiagnosticStage.STAGE_04_INTENT_ANALYZED,
+                outcome = if (suppressForLoop) DiagnosticOutcome.FAILURE else DiagnosticOutcome.UNKNOWN,
+                category = if (suppressForLoop) DiagnosticCategory.REPLY_ANOMALY else DiagnosticCategory.STAGE_PIPELINE,
+                errorCode = if (suppressForLoop) "clarification_loop_suppressed" else ununderstoodStatus.name.lowercase(),
+                description = "نية غير مؤكدة (${ununderstoodStatus.name})؛ القرار=${if (resolvedUnunderstoodReply.isNullOrBlank()) "كتم" else "توضيح"}",
+                engineUsed = pass1Outcome.activeEngineLabel,
+                fallbackTriggered = pass1Outcome.switchedToFallback,
+                anomalies = intentAnomalies
+            )
             if (resolvedUnunderstoodReply.isNullOrBlank()) {
                 diagnosticLogger.log(
                     tag = DiagnosticEventTag.REPLY_SUPPRESSED,
@@ -371,7 +425,8 @@ class SmartCollaborationCoordinator(
                         fallbackModeApplied = appliedMode
                     ),
                     suppressedByUnknownIntent = true,
-                    engineFailureCategory = EngineFailureCategory.NONE
+                    engineFailureCategory = EngineFailureCategory.NONE,
+                    traceId = traceId
                 )
             }
 
@@ -411,7 +466,8 @@ class SmartCollaborationCoordinator(
                     fallbackModeApplied = appliedMode
                 ),
                 suppressedByUnknownIntent = false,
-                engineFailureCategory = EngineFailureCategory.NONE
+                engineFailureCategory = EngineFailureCategory.NONE,
+                traceId = traceId
             )
         }
 
@@ -498,7 +554,8 @@ class SmartCollaborationCoordinator(
                                 customerKey = contextEntity.customerKey,
                                 phone = input.phone,
                                 name = input.senderName,
-                                idempotencyKey = if (input.isSandbox) null else input.messageId.ifBlank { null }
+                                idempotencyKey = if (input.isSandbox) null else input.messageId.ifBlank { null },
+                                traceId = traceId
                             ).also { res ->
                                 latencies["sa_account_action"] = (clockMs() - actionStart).coerceAtLeast(0L)
                                 if (res.ok) {
@@ -607,7 +664,8 @@ class SmartCollaborationCoordinator(
                                 intent = resolvedIntent,
                                 customerKey = contextEntity.customerKey,
                                 isGroup = input.isGroup,
-                                excludeProductIds = shownIdsForConv
+                                excludeProductIds = shownIdsForConv,
+                                traceId = traceId
                             ).also { res ->
                                 latencies["smart_advisor_knowledge"] =
                                     (latencies["smart_advisor_knowledge"] ?: 0L) +
@@ -729,7 +787,8 @@ class SmartCollaborationCoordinator(
                                 msg = msgForWebhook,
                                 aiQuery = queryText,
                                 idempotencyKey = if (input.isSandbox) null else input.messageId.ifBlank { null },
-                                reason = reasonText
+                                reason = reasonText,
+                                traceId = traceId
                             ).also { res ->
                                 latencies["webhook_tool"] =
                                     (latencies["webhook_tool"] ?: 0L) +
@@ -799,7 +858,8 @@ class SmartCollaborationCoordinator(
                 settings = aiSettings,
                 userMessage = input.messageText,
                 systemInstruction = synthesisPrompt,
-                recentTurns = recentTurns
+                recentTurns = recentTurns,
+                traceId = traceId
             )
             latencies["ai_compose_final"] =
                 (latencies["ai_compose_final"] ?: 0L) +
@@ -897,7 +957,8 @@ class SmartCollaborationCoordinator(
                             source = activeEngineLabel,
                             failureReason = synErr
                         ),
-                        engineFailureCategory = synFailureCat
+                        engineFailureCategory = synFailureCat,
+                        traceId = traceId
                     )
                 }
                 val safeFallback = buildSafeToolFallbackReply(
@@ -951,7 +1012,8 @@ class SmartCollaborationCoordinator(
                             source = activeEngineLabel,
                             failureReason = synErr
                         ),
-                        engineFailureCategory = synFailureCat
+                        engineFailureCategory = synFailureCat,
+                        traceId = traceId
                     )
                 }
                 currentDecision = currentDecision.copy(reply = safeFallback)
@@ -1069,6 +1131,35 @@ class SmartCollaborationCoordinator(
             conversationMemoryManager.resetClarificationState(conversationKey)
         }
 
+        val composedAnomalies = detectComposedReplyAnomalies(
+            userMessage = input.messageText,
+            replyText = resolvedReplyText,
+            saIntent = saIntent,
+            verifiedKnowledge = effectiveVerified,
+            recentTurns = recentTurns
+        )
+        diagnosticLogger.logTrace(
+            traceId = traceId,
+            operationType = "reply_composed",
+            stage = DiagnosticStage.STAGE_10_REPLY_COMPOSED,
+            outcome = when {
+                resolvedReplyText.isNullOrBlank() -> DiagnosticOutcome.FAILURE
+                composedAnomalies.isNotEmpty() -> DiagnosticOutcome.UNKNOWN
+                else -> DiagnosticOutcome.SUCCESS
+            },
+            category = if (composedAnomalies.isNotEmpty()) DiagnosticCategory.REPLY_ANOMALY else DiagnosticCategory.STAGE_PIPELINE,
+            errorCode = composedAnomalies.firstOrNull()?.name?.lowercase().orEmpty(),
+            description = when {
+                resolvedReplyText.isNullOrBlank() -> "تمت صياغة رد فارغ بعد استدعاء المحرك والأدوات"
+                composedAnomalies.isNotEmpty() -> "تم رصد شذوذ محتمل في الرد النهائي: ${composedAnomalies.joinToString { it.labelAr }}"
+                else -> "تمت صياغة الرد النهائي بنجاح"
+            },
+            engineUsed = activeEngineLabel,
+            fallbackTriggered = switchedToQwen,
+            anomalies = composedAnomalies,
+            isVerboseStep = composedAnomalies.isEmpty() && !resolvedReplyText.isNullOrBlank()
+        )
+
         return CollaborationOutcome(
             replyText = resolvedReplyText,
             conversationKey = conversationKey,
@@ -1105,8 +1196,52 @@ class SmartCollaborationCoordinator(
                 detectedIntent = currentDecision.intent,
                 finalReply = resolvedReplyText,
                 source = activeEngineLabel
-            )
+            ),
+            traceId = traceId
         )
+    }
+
+    private fun detectComposedReplyAnomalies(
+        userMessage: String,
+        replyText: String?,
+        saIntent: String,
+        verifiedKnowledge: SmartAdvisorClient.SaKnowledgeResponse?,
+        recentTurns: List<AIReplyEngine.ChatTurn>
+    ): List<DiagnosticAnomaly> {
+        val anomalies = mutableListOf<DiagnosticAnomaly>()
+        val cleanReply = replyText.orEmpty().trim()
+        if (cleanReply.isEmpty()) {
+            anomalies += DiagnosticAnomaly.EMPTY_REPLY
+            return anomalies
+        }
+        val cleanUser = userMessage.trim()
+        val lowerUser = cleanUser.lowercase()
+        val lowerReply = cleanReply.lowercase()
+        val previousAssistantReplies = recentTurns
+            .filter { it.role.equals("assistant", ignoreCase = true) }
+            .map { it.text.trim() }
+            .filter { it.isNotBlank() }
+
+        if (previousAssistantReplies.isNotEmpty() && previousAssistantReplies.last() == cleanReply && cleanReply.length > 12) {
+            anomalies += DiagnosticAnomaly.REPLY_LOOP_DETECTED
+        }
+
+        val userAsksShipping = lowerUser.contains("شحن") || lowerUser.contains("توصيل") || lowerUser.contains("shipping")
+        val userAsksReturn = lowerUser.contains("استرجاع") || lowerUser.contains("ارجاع") || lowerUser.contains("استبدال")
+        val userAsksLocation = lowerUser.contains("موقع") || lowerUser.contains("عنوان") || lowerUser.contains("فرع")
+        val replyTalksShipping = lowerReply.contains("شحن") || lowerReply.contains("توصيل")
+        val replyTalksReturn = lowerReply.contains("استرجاع") || lowerReply.contains("ارجاع") || lowerReply.contains("استبدال")
+        val replyTalksLocation = lowerReply.contains("موقع") || lowerReply.contains("عنوان") || lowerReply.contains("فرع")
+
+        if ((userAsksShipping && !replyTalksShipping && (replyTalksReturn || replyTalksLocation)) ||
+            (userAsksReturn && !replyTalksReturn && replyTalksShipping) ||
+            (userAsksLocation && !replyTalksLocation && replyTalksShipping) ||
+            (verifiedKnowledge?.ok == true && verifiedKnowledge.hasVerifiedData && saIntent == "product_search" &&
+                (lowerReply.contains("لا تتوفر لدي") || lowerReply.contains("غير متوفرة حالياً") || lowerReply.contains("تواصل مع خدمة")))
+        ) {
+            anomalies += DiagnosticAnomaly.REPLY_QUESTION_MISMATCH
+        }
+        return anomalies.distinct()
     }
 
     private fun detectUnunderstoodStatus(
@@ -1212,7 +1347,8 @@ class SmartCollaborationCoordinator(
                 append("- الطول: ").append(settings.effectiveLengthInstruction()).append('\n')
                 append("- اللغة: ").append(settings.effectiveLanguageInstruction())
             },
-            recentTurns = recentTurns
+            recentTurns = recentTurns,
+            traceId = DiagnosticTraceContext.newTraceId()
         )
         val raw = pass2.decision?.reply?.takeIf { it.isNotBlank() } ?: fact
         return AIReplyEngine.enforceToneAndLength(raw, settings)

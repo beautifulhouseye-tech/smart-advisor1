@@ -399,6 +399,17 @@ class AutoReplyEngine internal constructor(
 
         return when (val outcome = finalOutcome ?: ReplyDispatcher.SendOutcome.FailedConfirmed("لم يتم الإرسال")) {
             is ReplyDispatcher.SendOutcome.Sent -> {
+                diagnosticLogger.logTrace(
+                    traceId = decision.traceId.ifBlank { DiagnosticTraceContext.newTraceId() },
+                    operationType = "reply_dispatch",
+                    stage = DiagnosticStage.STAGE_12_REPLY_DISPLAYED_TO_USER,
+                    outcome = DiagnosticOutcome.SUCCESS,
+                    category = DiagnosticCategory.STAGE_PIPELINE,
+                    engineUsed = decision.activeEngineLabel,
+                    fallbackTriggered = decision.switchedToQwen,
+                    description = "تم إرسال وعرض الرد للعميل عبر ${outcome.deliveryMethod}",
+                    isVerboseStep = true
+                )
                 matchedRule?.let { rule ->
                     repository.incrementRuleHit(rule.id)
                     resolvedRuleContent?.templateId?.let { tid ->
@@ -459,6 +470,18 @@ class AutoReplyEngine internal constructor(
                 )
             }
             is ReplyDispatcher.SendOutcome.FailedConfirmed -> {
+                diagnosticLogger.logTrace(
+                    traceId = decision.traceId.ifBlank { DiagnosticTraceContext.newTraceId() },
+                    operationType = "reply_dispatch",
+                    stage = DiagnosticStage.STAGE_12_REPLY_DISPLAYED_TO_USER,
+                    outcome = DiagnosticOutcome.FAILURE,
+                    category = DiagnosticCategory.REPLY_ANOMALY,
+                    errorCode = "reply_not_displayed_in_ui",
+                    engineUsed = decision.activeEngineLabel,
+                    fallbackTriggered = decision.switchedToQwen,
+                    description = "وصل الرد للتطبيق ولكن فشل إرساله/عرضه للمستخدم: ${outcome.error}",
+                    anomalies = listOf(DiagnosticAnomaly.REPLY_NOT_DISPLAYED_IN_UI)
+                )
                 conversationMemoryManager?.discardPendingHandoffTurn(incoming.msgKey)
                 repository.recordReplyLog(
                     ReplyLogEntity(
@@ -477,6 +500,18 @@ class AutoReplyEngine internal constructor(
                 LocalOutcome.SendFailedConfirmed(outcome.error)
             }
             is ReplyDispatcher.SendOutcome.DeliveryUnknown -> {
+                diagnosticLogger.logTrace(
+                    traceId = decision.traceId.ifBlank { DiagnosticTraceContext.newTraceId() },
+                    operationType = "reply_dispatch",
+                    stage = DiagnosticStage.STAGE_12_REPLY_DISPLAYED_TO_USER,
+                    outcome = DiagnosticOutcome.UNKNOWN,
+                    category = DiagnosticCategory.REPLY_ANOMALY,
+                    errorCode = "reply_delivery_unknown",
+                    engineUsed = decision.activeEngineLabel,
+                    fallbackTriggered = decision.switchedToQwen,
+                    description = "وصل الرد للتطبيق وحالة عرضه للمستخدم غير مؤكدة: ${outcome.error}",
+                    anomalies = listOf(DiagnosticAnomaly.REPLY_NOT_DISPLAYED_IN_UI)
+                )
                 conversationMemoryManager?.discardPendingHandoffTurn(incoming.msgKey)
                 repository.recordReplyLog(
                     ReplyLogEntity(
